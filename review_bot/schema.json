@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review output",
+  "description": "Shared contract for review agent, coordinator output, and GitHub posting (Phase 1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "findings",
+    "overall_correctness",
+    "overall_explanation",
+    "overall_confidence_score",
+    "status"
+  ],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "body",
+          "confidence_score",
+          "priority",
+          "code_location",
+          "suggested_fix"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Evidence, problem, and a concrete failure scenario. API-reality findings must cite the published documentation URL here."
+          },
+          "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "priority": {
+            "type": "integer",
+            "enum": [0, 1, 2],
+            "description": "0 = suggestion only, 1 = warning (potential correctness issue), 2 = critical (definite bug or production-safety)."
+          },
+          "code_location": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["absolute_file_path", "line_range"],
+            "properties": {
+              "absolute_file_path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Repository-relative file path exactly as it appears in the PR diff (right-hand side)."
+              },
+              "line_range": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["start", "end"],
+                "properties": {
+                  "start": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First line number in the new (right-side) file."
+                  },
+                  "end": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Last line number in the new (right-side) file; equals start for a single-line location."
+                  }
+                }
+              }
+            }
+          },
+          "suggested_fix": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description"],
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "replacement": {
+                "type": "string",
+                "description": "Optional concrete replacement code."
+              }
+            }
+          }
+        }
+      }
+    },
+    "overall_correctness": {
+      "type": "string",
+      "enum": ["patch is correct", "patch is incorrect"]
+    },
+    "overall_explanation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "overall_confidence_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["no_further_concerns", "review_in_progress"]
+    }
+  }
+}

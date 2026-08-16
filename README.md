@@ -9,11 +9,12 @@ optional orchestration integration.
 
 ## Current phase
 
-**Phase 1 — Local CLI with one correctness agent**
+**Phase 1 — Local CLI with correctness and API-reality agents**
 
 - Fetch a PR diff via GitHub App installation token.
 - Clone the repository and check out the PR branch.
-- Run a correctness sub-agent and a coordinator.
+- Run a correctness sub-agent and an API-reality sub-agent concurrently.
+- Run a coordinator that deduplicates, filters, and rewrites findings.
 - Validate that every finding maps to a line in the PR diff.
 - Post the review as the GitHub App.
 
@@ -23,6 +24,21 @@ proposal and `docs/review-bot-proposal.md` for background and learnings.
 ## Repository layout
 
 ```text
+review_bot/               Python package for the review bot
+  review.py               CLI entrypoint and end-to-end pipeline
+  github.py               GitHub App auth, PR fetch, review POST
+  workspace.py            Clone/checkout/bootstrap/cleanup
+  shared_context.py       Assemble shared-context.md for agents
+  diff_validator.py       Parse diff and validate finding locations
+  schema.py / schema.json Review output schema and validation
+  coordinator.py          Coordinator agent wiring
+  agents/
+    runner.py             Agent runner abstraction and codex driver
+  prompts/
+    correctness.md        Correctness agent prompt
+    api-reality.md        API-reality agent prompt
+    coordinator.md        Coordinator prompt
+tests/                    Deterministic pytest suite
 openspec/                 OpenSpec planning artifacts
   config.yaml             Project context and artifact rules
   changes/review-bot-phase-1/
@@ -38,3 +54,6 @@ docs/                     Background docs and learnings
 - Python project managed with `uv`, `pyproject.toml`, `ruff`, `pyright`, and
   `pytest`.
 - GitHub App credentials and workspace paths live in the ignored local `.env`.
+- Install dev dependencies with `uv sync --extra dev`.
+- Run checks: `uv run pytest`, `uv run ruff check review_bot tests`,
+  `uv run pyright review_bot tests`.

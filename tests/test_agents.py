@@ -1,0 +1,117 @@
+"""Deterministic tests for the agent runner and concurrent execution."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from review_bot.agents.runner import (
+    AgentResult,
+    CodexAgentRunner,
+    run_agents_concurrently,
+)
+from tests.conftest import FakeAgentRunner, make_review
+
+
+def test_run_agents_concurrently_preserves_order():
+    runner = FakeAgentRunner(
+        {
+            "correctness": make_review(findings=[]),
+            "api-reality": make_review(findings=[]),
+        }
+    )
+    results = run_agents_concurrently(
+        runner,
+        [("correctness", "p1"), ("api-reality", "p2")],
+        Path("/tmp"),
+    )
+    assert [r.name for r in results] == ["correctness", "api-reality"]
+    assert all(r.ok for r in results)
+
+
+def test_run_agents_concurrently_isolates_failures():
+    runner = FakeAgentRunner(
+        {
+            "correctness": make_review(findings=[]),
+            "api-reality": Exception("boom"),
+        }
+    )
+    results = run_agents_concurrently(
+        runner,
+        [("correctness", "p1"), ("api-reality", "p2")],
+        Path("/tmp"),
+    )
+    assert results[0].ok
+    assert not results[1].ok
+    assert results[1].error is not None
+    assert "boom" in results[1].error
+
+
+def test_run_agents_empty_list():
+    runner = FakeAgentRunner({})
+    assert run_agents_concurrently(runner, [], Path("/tmp")) == []
+
+
+def test_codex_runner_command_builds(tmp_path: Path):
+    from review_bot.schema import load_schema
+
+    schema = load_schema()
+    runner = CodexAgentRunner(command="codex", model="gpt-4o", timeout=60, schema=schema)
+    try:
+        assert runner._schema_file.exists()
+        assert json.loads(runner._schema_file.read_text(encoding="utf-8")) == schema
+    finally:
+        runner.close()
+
+
+def test_codex_runner_validates_output(tmp_path: Path):
+    from review_bot.schema import load_schema
+
+    out_file = tmp_path / "correctness.json"
+    out_file.write_text(json.dumps(make_review(findings=[])))
+
+    class FixedCodexRunner(CodexAgentRunner):
+        def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+            from review_bot.schema import validate_review_output
+
+            data = json.loads(out_file.read_text(encoding="utf-8"))
+            validate_review_output(data)
+            return AgentResult(name=name, ok=True, output=data)
+
+    runner = FixedCodexRunner(schema=load_schema())
+    try:
+        result = runner.run("correctness", "prompt", tmp_path)
+        assert result.ok
+        assert result.output is not None
+        assert result.output["status"] == "no_further_concerns"
+    finally:
+        runner.close()
+
+
+def test_codex_runner_rejects_invalid_output(tmp_path: Path):
+    from review_bot.schema import SchemaError, load_schema
+
+    out_file = tmp_path / "correctness.json"
+    out_file.write_text(json.dumps({"invalid": True}))
+
+    class FixedCodexRunner(CodexAgentRunner):
+        def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+            from review_bot.schema import validate_review_output
+
+            data = json.loads(out_file.read_text(encoding="utf-8"))
+            try:
+                validate_review_output(data)
+            except SchemaError as e:
+                return AgentResult(
+                    name=name, ok=False, error=f"agent output failed schema validation: {e}"
+                )
+            return AgentResult(name=name, ok=True, output=data)
+
+    runner = FixedCodexRunner(schema=load_schema())
+    try:
+        result = runner.run("correctness", "prompt", tmp_path)
+        assert not result.ok
+        assert result.error is not None
+        assert "schema validation" in result.error
+    finally:
+        runner.close()
