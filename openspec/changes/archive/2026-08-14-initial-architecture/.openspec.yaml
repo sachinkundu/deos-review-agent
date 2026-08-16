@@ -1,5 +1,0 @@
-schema: spec-driven
-created: 2026-08-11
-goal: Define the smallest implementable architecture for Linear webhook ingress,
-  durable dispatch, workflow state, human approvals, and Python-based agent
-  execution.

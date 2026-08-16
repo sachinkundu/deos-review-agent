@@ -1,45 +1,25 @@
 schema: spec-driven
 
 context: |
-  Project: deos — a serverless, Linear-driven software engineering workflow.
-  Current scope: initial architecture for Linear webhook ingress, durable dispatch,
-  workflow state, human approvals, OpenSpec artifacts, and Python-based agents on
-  Cloudflare Workers where practical.
-  Engineering preference: readable Python managed with uv, pyproject.toml, ruff,
-  pyright, and pytest. Keep the first slice small, deterministic, auditable, and
-  safe to run without production credentials or live agent side effects.
-  External events must be authenticated, idempotent, and processed asynchronously.
-  Human approval is an explicit state and must not be bypassed by automation.
+  Project: review-bot — a correctness-focused PR review bot that posts line
+  comments as a GitHub App.
+  Current scope: local-first CLI that fetches a PR diff via a GitHub App
+  installation token, checks out the branch, runs a correctness sub-agent
+  through a coordinator, validates diff line locations, and posts a GitHub
+  review. Later phases may add tests/safety agents, risk tiers, re-reviews,
+  break-glass overrides, and optional integration with external orchestration.
+  Engineering preference: readable Python managed with uv, pyproject.toml,
+  ruff, pyright, and pytest. Keep the first slice small, deterministic,
+  auditable, and safe to run without production credentials or live agent
+  side effects. GitHub App credentials must never be committed.
 
 rules:
   proposal:
     - Keep the proposal concise and implementation-oriented.
     - State non-goals explicitly.
-    - Prefer Python unless a Cloudflare runtime constraint makes TypeScript materially better.
+    - Prefer Python for agent and CLI code.
   design:
-    - Include a component diagram, event flow, minimal data model, and failure modes.
+    - Include a component diagram, data flow, minimal data model, and failure modes.
   tasks:
     - Break work into independently verifiable increments.
-    - Include deterministic tests before live integrations.
-
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
-
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+    - Include deterministic tests before live GitHub integrations.

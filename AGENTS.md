@@ -2,48 +2,43 @@
 
 ## Demo-first delivery
 
-Before implementing an integration, inspect the provider's primary contract
-and identify whether a real sandbox/test resource can trigger it. Do not infer
-the wire format, signature construction, timestamp units, or response contract
-from a fake payload. Do not treat fakes or unit tests as evidence that the
-provider can reach the deployed system.
+Before implementing the GitHub integration, inspect the real GitHub provider
+contract (GitHub App auth, installation tokens, pull request review API, and
+diff line validation) and test against a real repository. Do not infer the wire
+format, signature construction, timestamp units, or response contract from a fake
+payload.
 
-For integrations, a passing test suite is not completion evidence. Separate
-these claims explicitly:
+Separate these claims explicitly:
 
-- **Synthetic ingress proof:** a locally generated, correctly signed request
-  sent directly to the Worker.
-- **Provider-originated proof:** the real provider emits an event, the Worker
-  receives it, and the durable store records the expected classification.
-- **Visual proof:** Codex Browser screenshots of the provider configuration and
-  the triggering issue/resource state.
+- **Local proof:** deterministic tests and a locally run CLI review against a
+  real PR, without posting to GitHub.
+- **Provider-originated proof:** the real GitHub App posts a review on a real
+  PR, and the bot's line comments map to diff lines exactly as GitHub accepts
+  them.
+- **Visual proof:** screenshots of the GitHub App configuration, the PR review
+  state, and the posted comments.
 
-Do not describe synthetic ingress as end-to-end provider verification.
+Do not describe local-only execution as end-to-end GitHub verification.
 
 ## Tool selection
 
-- Use Linear MCP by default for creating and transitioning test issues. Use
-  Codex Browser only when a Linear login/configuration screen is required or
-  when a screenshot is needed for visual proof.
-- Use Wrangler or the Cloudflare API—not the browser—for Worker deployment,
-  secrets, D1, Queues, and R2. Prefer `CLOUDFLARE_API_TOKEN` loaded from the ignored local
-  `.env`; never print or commit it.
-- Use Showboat to capture executable commands and their real remote output.
-- Use the D1 query API as read-only evidence of the delivery record.
+- Use the GitHub CLI (`gh`) or the GitHub REST API for repository, PR, and
+  review operations. Prefer API tokens loaded from the ignored local `.env`;
+  never print or commit them.
+- Use Codex Browser only when a screenshot is needed for visual proof of the
+  GitHub web UI.
 - For every implementation PR, attach the strongest visual proof available:
-  sanitized screenshots of provider configuration and resulting state. Link or
-  embed them in the PR body/comment alongside Showboat/D1 evidence.
+  screenshots of the GitHub App configuration, PR review state, and posted
+  comments.
 
-## Linear webhook invariants
+## GitHub App invariants
 
-- Verify the raw body with HMAC-SHA256 using `Linear-Signature`.
-- Treat `Linear-Timestamp` as milliseconds and use `Linear-Delivery` as the
-  idempotency key.
-- Return HTTP `200` for accepted, ignored, and duplicate deliveries. Linear
-  treats other response codes as failed deliveries and may retry.
-- Configure the filter using actual Linear state names. This workspace uses
-  `In Progress`; `Started` is not the displayed status name.
-
-For the maintained provider-proof procedure, evidence hierarchy, and PR
-packaging guidance, read
-[`docs/linear-cloudflare-e2e-lessons.md`](docs/linear-cloudflare-e2e-lessons.md).
+- Mint a short-lived installation token from the App private key for every
+  review run; do not reuse tokens across runs.
+- Validate every `(path, line, side=RIGHT)` against the PR diff before posting;
+  GitHub rejects comments that do not map to a changed line.
+- Treat the PR `head_sha` as the review target; do not post against a stale SHA.
+- Skip any PR whose `sender` matches the GitHub App bot username to avoid
+  review loops.
+- Return success for accepted, ignored, and duplicate deliveries when the bot
+  is invoked via webhook later; GitHub treats non-2xx responses as failures.
