@@ -31,14 +31,18 @@ The system SHALL fetch the PR diff in a format that can be parsed per file and p
 
 #### Scenario: Diff fetch succeeds
 - **WHEN** the system requests the diff for a valid PR
-- **THEN** it receives a diff that maps each changed file to its added and removed line numbers on the right-hand side
+- **THEN** it receives a diff that maps added lines to right-side line numbers and removed lines to left-side line numbers per file
 
-### Requirement: Post pull request review
-The system SHALL post a pull request review containing inline comments and a summary body under the GitHub App identity.
+### Requirement: Post pull request review bound to head SHA
+The system SHALL post a pull request review containing inline comments and a summary body under the GitHub App identity, targeting the fetched head SHA.
 
 #### Scenario: Review posts successfully
-- **WHEN** the system submits a review with valid inline comments and a summary body
-- **THEN** GitHub creates the review and returns a stable review ID
+- **WHEN** the system submits a review with valid inline comments, a summary body, and the fetched head SHA as `commit_id`
+- **THEN** GitHub creates the review against that exact commit and returns a stable review ID
+
+#### Scenario: Head SHA changed after fetch
+- **WHEN** the PR head SHA has changed between metadata fetch and review POST
+- **THEN** the system re-fetches metadata and diff, or fails the run rather than posting against a stale head
 
 #### Scenario: Review post fails
 - **WHEN** GitHub rejects the review payload
@@ -50,3 +54,10 @@ The system SHALL skip the review when the PR sender login matches the GitHub App
 #### Scenario: Bot opens a pull request
 - **WHEN** the PR sender login equals the configured bot username
 - **THEN** the system exits successfully without posting a review
+
+### Requirement: Capture linked issue references
+The system SHALL extract any linked issue references from the PR title and body and include them in the shared context for review agents.
+
+#### Scenario: PR links to an issue
+- **WHEN** the PR title or body contains a reference such as `Fixes #123` or `SAC-87`
+- **THEN** the shared context includes those references so agents can correlate intent

@@ -1,18 +1,18 @@
 ## Purpose
 
-Run a correctness sub-agent that flags logic bugs, unhandled error paths, claim mismatches, and architecture-ordering bugs in the changed code.
+Run a correctness review agent that flags logic bugs, unhandled error paths, claim mismatches, and architecture-ordering bugs in the changed code.
 
 ## ADDED Requirements
 
 ### Requirement: Assemble shared context
-The system SHALL assemble a shared context document containing PR metadata, changed files, and any validation command results, and make it available to the correctness agent.
+The system SHALL assemble a shared context document containing PR metadata, linked issue references, changed files, and any validation command results, and make it available to the correctness agent.
 
 #### Scenario: Shared context is complete
 - **WHEN** the system prepares inputs for the correctness agent
-- **THEN** the shared context includes PR title, body, head SHA, base SHA, changed files, and validation results
+- **THEN** the shared context includes PR title, body, head SHA, base SHA, linked issue references, changed files, and validation results
 
 ### Requirement: Correctness agent produces structured findings
-The system SHALL run a correctness sub-agent that reads the shared context and diff and emits findings matching the review output schema.
+The system SHALL run a correctness review agent that reads the shared context and diff and emits findings matching the review output schema.
 
 #### Scenario: Findings are emitted
 - **WHEN** the correctness agent finishes analyzing the diff

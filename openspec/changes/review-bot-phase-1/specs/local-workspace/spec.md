@@ -5,11 +5,15 @@ Prepare an isolated local workspace containing the pull request branch so the re
 ## ADDED Requirements
 
 ### Requirement: Clone repository into isolated workspace
-The system SHALL clone the target repository into a dedicated workspace directory that is separate from the review-bot source tree.
+The system SHALL clone the target repository into a dedicated workspace directory that is separate from the review-bot source tree, then invoke a consumer-provided bootstrap script to prepare the environment.
 
-#### Scenario: Clone succeeds
+#### Scenario: Clone and bootstrap succeed
 - **WHEN** the system creates a workspace for a PR
-- **THEN** it clones the repository and the workspace contains a clean working copy
+- **THEN** it clones the repository, checks out the PR branch, runs the configured bootstrap script if present, and the workspace contains a prepared working copy
+
+#### Scenario: Bootstrap script fails
+- **WHEN** the configured bootstrap script exits with an error
+- **THEN** the system reports the bootstrap failure and stops the review run
 
 #### Scenario: Clone target is unreachable
 - **WHEN** the repository URL is invalid or the App token cannot read the repository
@@ -33,13 +37,17 @@ The system SHALL allow the operator to configure the root workspace directory vi
 - **WHEN** the operator supplies a workspace root path
 - **THEN** the system creates the PR-specific workspace under that root
 
-### Requirement: Clean up workspace
-The system SHALL remove the PR-specific workspace after the review run completes, unless the operator configures it to be retained.
+### Requirement: Clean up workspace at end of review session
+The system SHALL retain the PR-specific workspace for the duration of the review session and remove it only when the session ends or when the operator explicitly requests cleanup.
 
-#### Scenario: Default cleanup
-- **WHEN** the review run completes
-- **THEN** the system deletes the PR-specific workspace
+#### Scenario: Single-turn session cleanup
+- **WHEN** the review run completes in a single-turn session
+- **THEN** the system deletes the PR-specific workspace after posting the review
 
-#### Scenario: Retain workspace for debugging
-- **WHEN** the operator enables workspace retention
-- **THEN** the system leaves the workspace intact after the review run
+#### Scenario: Session retention for multi-turn reviews
+- **WHEN** the operator configures the session to span multiple review turns
+- **THEN** the system retains the workspace until the session ends
+
+#### Scenario: Explicit cleanup
+- **WHEN** the operator invokes a cleanup command
+- **THEN** the system removes the PR-specific workspace regardless of session state

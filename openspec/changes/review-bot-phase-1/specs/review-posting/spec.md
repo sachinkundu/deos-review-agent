@@ -12,7 +12,7 @@ The system SHALL verify that every inline comment's `(path, line, side=RIGHT)` m
 - **THEN** the system marks it as attachable and includes it in the inline comments list
 
 #### Scenario: Location is not in the diff
-- **WHEN** a finding points to a line that is not on the right-hand side of the diff
+- **WHEN** a finding points to a removed line or any other line not on the right-hand side of the diff
 - **THEN** the system moves the finding to the review summary body and does not attempt an inline comment
 
 ### Requirement: Post exactly one issue per inline comment
@@ -23,7 +23,7 @@ The system SHALL create one GitHub review comment per finding; it SHALL NOT merg
 - **THEN** each finding becomes a separate inline comment or a separate entry in the summary body
 
 ### Requirement: Set review event from severity
-The system SHALL choose the GitHub review event based on the highest-severity finding according to the final rubric.
+The system SHALL choose the GitHub review event based on the highest-severity finding according to the final rubric, regardless of whether the finding is attached to a diff line.
 
 #### Scenario: No critical findings
 - **WHEN** there are no findings or only suggestions
@@ -31,14 +31,18 @@ The system SHALL choose the GitHub review event based on the highest-severity fi
 
 #### Scenario: Critical findings
 - **WHEN** there is at least one critical or production-safety finding
-- **THEN** the system posts the review with event `REQUEST_CHANGES`
+- **THEN** the system posts the review with event `REQUEST_CHANGES`, even if the critical finding only appears in the summary body
 
 ### Requirement: Validate output before posting
-The system SHALL validate the final review payload against the review output schema before calling the GitHub API.
+The system SHALL validate the final review payload against the review output schema and verify that the review targets the fetched head SHA before calling the GitHub API.
 
 #### Scenario: Payload is valid
-- **WHEN** the final review payload passes schema validation
+- **WHEN** the final review payload passes schema validation and targets the fetched head SHA
 - **THEN** the system proceeds to post the review to GitHub
+
+#### Scenario: Head SHA changed before posting
+- **WHEN** the PR head SHA has changed between fetch and post
+- **THEN** the system re-fetches the diff and re-validates findings, or fails the run without posting
 
 #### Scenario: Payload is invalid
 - **WHEN** the final review payload fails schema validation

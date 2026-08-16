@@ -1,6 +1,6 @@
 ## Context
 
-See `proposal.md` for motivation and scope. This design covers the local CLI implementation of Phase 1: a correctness sub-agent, an API-reality sub-agent, one coordinator, GitHub App auth, workspace setup, and review posting. The target user is a developer running the bot from their machine against a real GitHub PR.
+See `proposal.md` for motivation and scope. This design covers the local CLI implementation of Phase 1: a correctness review agent, an API-reality review agent, one coordinator, GitHub App auth, workspace setup, and review posting. The target user is a developer running the bot from their machine against a real GitHub PR.
 
 ## Goals / Non-Goals
 
@@ -15,9 +15,9 @@ See `proposal.md` for motivation and scope. This design covers the local CLI imp
 **Non-Goals:**
 
 - Running as a persistent service or webhook handler.
-- Multi-agent concurrency, risk tiers, or diff filtering beyond lockfiles.
+- Risk tiers or diff filtering beyond lockfiles.
 - Re-reviews, break-glass overrides, or human approval gates.
-- Integration with external orchestration, D1, R2, or Workers.
+- Integration with external orchestration systems or persistent workflow state.
 - Applying suggested fixes automatically.
 
 ## Components
@@ -36,7 +36,7 @@ shared_context.py  ---->  assemble shared-context.md
   |
   +---> agents/correctness.py + prompts/correctness.md  ---->  JSON findings
   |
-  +---> agents/api_reality.py + prompts/api-reality.md + provider contracts  ---->  JSON findings
+  +---> agents/api_reality.py + prompts/api-reality.md + web-fetch tool  ---->  JSON findings
   |
   v
 coordinator.py + prompts/coordinator.md  ---->  filtered/rewritten findings
@@ -55,11 +55,10 @@ github.py  ---->  POST review
 |---|---|
 | `review.py` | CLI entrypoint; wires components and handles top-level errors. |
 | `github.py` | App JWT minting, installation token exchange, PR metadata/diff fetch, review POST, bot-self-skip. |
-| `workspace.py` | Clone repository into isolated path, checkout head SHA, optional cleanup. |
-| `shared_context.py` | Write `shared-context.md` from PR metadata and validation results. |
+| `workspace.py` | Clone repository into isolated path, checkout head SHA, run consumer bootstrap script, manage session cleanup. |
+| `shared_context.py` | Write `shared-context.md` from PR metadata, linked issue references, and validation results. |
 | `agents/correctness.py` | Invoke the correctness agent with the shared context and filtered diff. |
-| `agents/api_reality.py` | Invoke the API-reality agent with shared context, diff, and provider contract summaries. |
-| `agents/provider_contracts.py` | Load and expose accurate GitHub, Linear, and Cloudflare contract summaries for the API-reality agent. |
+| `agents/api_reality.py` | Invoke the API-reality agent with shared context and diff; the agent consults provider docs via web-fetch tooling. |
 | `coordinator.py` | Deduplicate, filter, rewrite, and assign final severity/verdict. |
 | `schema.py` / `schema.json` | Validate agent and coordinator output against the review schema. |
 | `diff_validator.py` | Verify that each `code_location` maps to a right-side diff line. |
@@ -87,7 +86,7 @@ flowchart LR
 5. `shared_context.py` writes `shared-context.md` containing PR title, body, head/base SHA, changed files, and validation results.
 6. The correctness agent and API-reality agent run concurrently.
    - The correctness agent reads `shared-context.md` and the diff and emits JSON findings for logic bugs, error paths, claim mismatches, and architecture-ordering bugs.
-   - The API-reality agent reads `shared-context.md`, the diff, and provider contract summaries, and emits JSON findings for hallucinated or misused GitHub / Linear / Cloudflare APIs.
+   - The API-reality agent reads `shared-context.md` and the diff, consults provider documentation via web-fetch tooling, and emits JSON findings for hallucinated or misused APIs of any dependency.
 7. The coordinator reads findings from both agents, deduplicates by `(path, start_line, normalized_title)`, drops weak or contradicted items, and rewrites each remaining finding to one concrete issue.
 8. `schema.py` validates the coordinator output.
 9. `diff_validator.py` checks each `code_location` against the PR diff; attachable findings become inline comments, others move to the summary body.
@@ -135,15 +134,15 @@ Priority mapping:
 ### 1. Use a local CLI instead of a server
 A CLI avoids deployment, secrets management, and webhook handling in Phase 1. It lets us validate the review experience quickly. A server/webhook can be added in a later phase without changing the agent or coordinator prompts.
 
-Alternative considered: start with a Worker webhook. Rejected because it adds Cloudflare and webhook-signature complexity before the core review loop is proven.
+Alternative considered: start with a server/webhook handler. Rejected because it adds deployment, secrets management, and webhook-signature complexity before the core review loop is proven.
 
 ### 2. Keep credentials in environment variables
 GitHub App ID, installation ID, private key path, and workspace root are read from environment variables or a local `.env` file. They are never committed.
 
 Alternative considered: a configuration file. Rejected because environment variables are the standard local-secret pattern and keep the repo configuration-free.
 
-### 3. Use two focused sub-agents and one coordinator in Phase 1
-Split the work into a correctness agent (logic bugs, error paths, claim mismatches, architecture-ordering bugs) and an API-reality agent (hallucinated or misused GitHub / Linear / Cloudflare APIs). Smaller focused prompts are easier to tune and less likely to drift into each other's territory. The coordinator prompt handles deduplication and rewriting so the later multi-agent path reuses the same coordinator.
+### 3. Use two focused review agents and one coordinator in Phase 1
+Split the work into a correctness agent (logic bugs, error paths, claim mismatches, architecture-ordering bugs) and an API-reality agent (hallucinated or misused APIs of any dependency). Smaller focused prompts are easier to tune and less likely to drift into each other's territory. The coordinator prompt handles deduplication and rewriting so the later multi-agent path reuses the same coordinator.
 
 Alternative considered: one broad correctness agent covering everything. Rejected because it mixes provider-contract verification with code-bug hunting, making the prompt harder to stabilize.
 
@@ -160,6 +159,16 @@ Alternative considered: rely on GitHub's error response. Rejected because one ba
 ### 6. Use Python for the CLI and wiring
 Python is a good fit for GitHub API clients, file operations, and agent orchestration. The agent itself can be driven by any model interface that accepts a prompt and returns JSON; the wiring code does not depend on a specific provider in Phase 1.
 
+### 7. Invoke a consumer-provided bootstrap script in the workspace
+After cloning and checkout, the workspace setup runs an optional bootstrap script supplied by the project under review. This lets projects install dependencies, build generated files, or run checks without embedding project-specific steps in the review-bot source.
+
+Alternative considered: embed common setup commands. Rejected because different projects have different build requirements; a script hook keeps the bot generic.
+
+### 8. Continue the review when one agent fails
+If one review agent fails or returns invalid output, the run still posts findings from any successful agents and notes the failure in the summary. This avoids losing value from a partial review and matches the future multi-turn workflow where agents may be retried.
+
+Alternative considered: fail the whole run on any agent failure. Rejected because a single agent outage should not block the other agent's useful findings.
+
 ## Failure modes
 
 | Failure | Handling |
@@ -168,19 +177,21 @@ Python is a good fit for GitHub API clients, file operations, and agent orchestr
 | PR not found or no access | Surface the GitHub API error and exit non-zero. |
 | Clone or checkout fails | Surface the Git error and exit non-zero. |
 | Agent returns invalid JSON | Schema validation fails; surface the error and exit non-zero. |
+| One review agent fails | Report the failure in the review summary and continue with findings from any successful agents. |
 | Coordinator output fails schema validation | Surface validation errors and exit non-zero. |
-| No findings attach to diff lines | Post all findings in the summary body with `COMMENT`. |
+| No findings attach to diff lines | Post all findings in the summary body; use the event derived from severity (`COMMENT` for warnings, `REQUEST_CHANGES` for critical findings). |
 | GitHub rejects the review payload | Surface the provider error and exit non-zero. |
 | Bot opens the PR | Exit successfully without posting. |
+| Head SHA changed between fetch and post | Re-fetch metadata and diff, or fail the run rather than post against a stale head. |
 
 ## Risks / Trade-offs
 
 - **Agent output quality depends on the prompt.** → Keep prompts under version control, iterate on real PRs, and bias the coordinator toward dropping weak findings.
 - **Reading files outside the diff can lead to scope creep.** → The prompt instructs the agent to read outside the diff only when needed to judge correctness.
-- **Local workspace can grow large.** → Default cleanup is enabled; retention is opt-in for debugging.
+- **Local workspace can grow large.** → Workspaces are retained for the review session and cleaned up when the session ends; operators can request explicit cleanup.
 - **GitHub App credentials are plaintext on the developer machine.** → Load from `.env` which is gitignored; never log tokens.
 - **One bad line location can still reach the diff validator if the parser is wrong.** → Use a real diff from GitHub and test the validator against already-merged PRs.
-- **API-reality agent depends on accurate provider contract summaries.** → Version the contract summaries with the project and update them when provider packages change. Ground every finding in the real provider docs.
+- **API-reality agent must consult live provider docs.** → The agent uses web-fetch tooling to read the dependency's published API documentation and cites the source URL for every finding.
 - **Two agents can disagree.** → The coordinator resolves overlaps; contradicted findings are dropped unless one side has strong evidence.
 
 ## Migration plan
