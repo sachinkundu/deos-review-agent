@@ -1,44 +1,52 @@
 ## Purpose
 
-Run a correctness sub-agent over the pull request diff and shared context, then run a coordinator that deduplicates, filters, and rewrites the findings into a validated structured review output.
+Run multiple specialized sub-agents concurrently, feed their findings into a coordinator, and emit a single validated structured review output.
 
 ## ADDED Requirements
 
-### Requirement: Assemble shared context
-The system SHALL assemble a shared context document containing PR metadata, changed files, and any validation command results, and make it available to the sub-agent.
+### Requirement: Run sub-agents concurrently
+The system SHALL run the correctness sub-agent and the API-reality sub-agent concurrently.
 
-#### Scenario: Shared context is complete
-- **WHEN** the system prepares inputs for the correctness agent
-- **THEN** the shared context includes PR title, body, head SHA, base SHA, changed files, and validation results
+#### Scenario: Both agents start
+- **WHEN** the agent pipeline begins
+- **THEN** the correctness agent and the API-reality agent both receive their inputs and run in parallel
 
-### Requirement: Correctness agent produces structured findings
-The system SHALL run a correctness sub-agent that reads the shared context and diff and emits findings matching the review output schema.
+#### Scenario: One agent fails
+- **WHEN** one sub-agent fails or returns invalid output
+- **THEN** the pipeline reports the failure and stops before coordinator processing
 
-#### Scenario: Findings are emitted
-- **WHEN** the correctness agent finishes analyzing the diff
-- **THEN** it returns a JSON object containing findings, an overall correctness verdict, an explanation, confidence scores, and a status field
+### Requirement: Feed all findings to the coordinator
+The system SHALL pass the findings from every sub-agent to the coordinator.
 
-#### Scenario: Agent output is invalid
-- **WHEN** the correctness agent returns JSON that does not match the schema
-- **THEN** the system reports a schema validation error and stops the review run
+#### Scenario: Findings from two agents
+- **WHEN** both the correctness agent and the API-reality agent emit findings
+- **THEN** the coordinator receives the combined set
 
-### Requirement: Coordinator filters and rewrites findings
-The system SHALL run a coordinator that reads the sub-agent output, drops speculative or contradicted findings, deduplicates by file and line, and rewrites each remaining finding to contain exactly one issue.
+### Requirement: Coordinator deduplicates and filters findings
+The system SHALL run a coordinator that deduplicates findings by `(path, start_line, normalized_title)`, drops speculative or contradicted findings, and rewrites each remaining finding to contain exactly one issue.
 
-#### Scenario: Noisy findings are reduced
-- **WHEN** the coordinator receives multiple overlapping or low-confidence findings
-- **THEN** the coordinator output contains only distinct, well-supported findings with one issue per finding
+#### Scenario: Overlapping findings
+- **WHEN** two agents emit findings for the same line with the same root cause
+- **THEN** the coordinator emits one consolidated finding
 
-### Requirement: Every finding includes a concrete failure scenario
-The system SHALL require every finding to describe a concrete failure scenario and a suggested fix.
+### Requirement: Coordinator assigns final severity and verdict
+The system SHALL use the coordinator to assign final priority and an overall verdict using the approved rubric.
 
-#### Scenario: Valid finding
-- **WHEN** a finding is accepted by the coordinator
-- **THEN** it includes a title, body with failure scenario, code location, confidence score, priority, and suggested fix
+#### Scenario: Critical finding present
+- **WHEN** the coordinator retains a critical finding
+- **THEN** the overall verdict is `patch is incorrect` and the recommended GitHub event is `REQUEST_CHANGES`
 
-### Requirement: Preserve status field through the pipeline
-The system SHALL preserve the explicit `status` field from the sub-agent output through the coordinator so the caller can detect whether further review passes are expected.
+#### Scenario: No critical findings
+- **WHEN** there are no findings or only warnings and suggestions
+- **THEN** the overall verdict and recommended event follow the approved rubric
 
-#### Scenario: Status is forwarded
-- **WHEN** the coordinator emits final findings
-- **THEN** the output retains a status field indicating whether review is complete or in progress
+### Requirement: Validate coordinator output
+The system SHALL validate the coordinator output against the review output schema before handing it to the review-posting step.
+
+#### Scenario: Valid coordinator output
+- **WHEN** the coordinator output matches the schema
+- **THEN** the pipeline proceeds to review posting
+
+#### Scenario: Invalid coordinator output
+- **WHEN** the coordinator output does not match the schema
+- **THEN** the system reports validation errors and stops the review run

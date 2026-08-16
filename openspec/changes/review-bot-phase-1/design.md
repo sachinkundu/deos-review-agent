@@ -1,6 +1,6 @@
 ## Context
 
-See `proposal.md` for motivation and scope. This design covers the local CLI implementation of Phase 1: one correctness sub-agent, one coordinator, GitHub App auth, workspace setup, and review posting. The target user is a developer running the bot from their machine against a real GitHub PR.
+See `proposal.md` for motivation and scope. This design covers the local CLI implementation of Phase 1: a correctness sub-agent, an API-reality sub-agent, one coordinator, GitHub App auth, workspace setup, and review posting. The target user is a developer running the bot from their machine against a real GitHub PR.
 
 ## Goals / Non-Goals
 
@@ -9,7 +9,7 @@ See `proposal.md` for motivation and scope. This design covers the local CLI imp
 - Provide a single CLI command that reviews a PR end-to-end.
 - Keep all GitHub App credentials local and out of the repository.
 - Produce structured, diff-validated review output that GitHub accepts.
-- Make the correctness agent prompt and coordinator prompt easy to iterate on independently of the wiring code.
+- Make the agent prompts and coordinator prompt easy to iterate on independently of the wiring code.
 - Allow the bot to read files outside the diff when the agent explicitly needs context.
 
 **Non-Goals:**
@@ -34,8 +34,9 @@ workspace.py  ---->  clone + checkout PR branch
   v
 shared_context.py  ---->  assemble shared-context.md
   |
-  v
-agents/correctness.py + prompts/correctness.md  ---->  JSON findings
+  +---> agents/correctness.py + prompts/correctness.md  ---->  JSON findings
+  |
+  +---> agents/api_reality.py + prompts/api-reality.md + provider contracts  ---->  JSON findings
   |
   v
 coordinator.py + prompts/coordinator.md  ---->  filtered/rewritten findings
@@ -57,6 +58,8 @@ github.py  ---->  POST review
 | `workspace.py` | Clone repository into isolated path, checkout head SHA, optional cleanup. |
 | `shared_context.py` | Write `shared-context.md` from PR metadata and validation results. |
 | `agents/correctness.py` | Invoke the correctness agent with the shared context and filtered diff. |
+| `agents/api_reality.py` | Invoke the API-reality agent with shared context, diff, and provider contract summaries. |
+| `agents/provider_contracts.py` | Load and expose accurate GitHub, Linear, and Cloudflare contract summaries for the API-reality agent. |
 | `coordinator.py` | Deduplicate, filter, rewrite, and assign final severity/verdict. |
 | `schema.py` / `schema.json` | Validate agent and coordinator output against the review schema. |
 | `diff_validator.py` | Verify that each `code_location` maps to a right-side diff line. |
@@ -68,8 +71,10 @@ flowchart LR
     CLI[review.py PR_URL] --> GH1[github.py fetch metadata + diff]
     GH1 --> WS[workspace.py clone + checkout]
     WS --> SC[shared_context.py write context]
-    SC --> AGENT[correctness agent]
-    AGENT --> COORD[coordinator]
+    SC --> CORR[correctness agent]
+    SC --> API[api-reality agent]
+    CORR --> COORD[coordinator]
+    API --> COORD
     COORD --> SCHEMA[schema validation]
     SCHEMA --> DV[diff_validator]
     DV --> GH2[github.py POST review]
@@ -80,8 +85,10 @@ flowchart LR
 3. If the sender matches the bot username, the run exits successfully with no review.
 4. `workspace.py` clones the repository and checks out the PR branch at the head SHA.
 5. `shared_context.py` writes `shared-context.md` containing PR title, body, head/base SHA, changed files, and validation results.
-6. The correctness agent reads `shared-context.md` and a basic diff (lockfiles stripped) and emits JSON findings.
-7. The coordinator reads the findings, deduplicates by `(path, start_line, normalized_title)`, drops weak or contradicted items, and rewrites each remaining finding to one concrete issue.
+6. The correctness agent and API-reality agent run concurrently.
+   - The correctness agent reads `shared-context.md` and the diff and emits JSON findings for logic bugs, error paths, claim mismatches, and architecture-ordering bugs.
+   - The API-reality agent reads `shared-context.md`, the diff, and provider contract summaries, and emits JSON findings for hallucinated or misused GitHub / Linear / Cloudflare APIs.
+7. The coordinator reads findings from both agents, deduplicates by `(path, start_line, normalized_title)`, drops weak or contradicted items, and rewrites each remaining finding to one concrete issue.
 8. `schema.py` validates the coordinator output.
 9. `diff_validator.py` checks each `code_location` against the PR diff; attachable findings become inline comments, others move to the summary body.
 10. `github.py` posts the review with the chosen `event`.
@@ -135,10 +142,10 @@ GitHub App ID, installation ID, private key path, and workspace root are read fr
 
 Alternative considered: a configuration file. Rejected because environment variables are the standard local-secret pattern and keep the repo configuration-free.
 
-### 3. Use one correctness agent and one coordinator in Phase 1
-One agent is enough to validate structured output, diff line validation, and review posting. The coordinator prompt handles deduplication and rewriting even with a single agent so that the later multi-agent path reuses the same coordinator.
+### 3. Use two focused sub-agents and one coordinator in Phase 1
+Split the work into a correctness agent (logic bugs, error paths, claim mismatches, architecture-ordering bugs) and an API-reality agent (hallucinated or misused GitHub / Linear / Cloudflare APIs). Smaller focused prompts are easier to tune and less likely to drift into each other's territory. The coordinator prompt handles deduplication and rewriting so the later multi-agent path reuses the same coordinator.
 
-Alternative considered: skip the coordinator in Phase 1. Rejected because it leaves us without a place to enforce one-issue-per-comment and severity assignment.
+Alternative considered: one broad correctness agent covering everything. Rejected because it mixes provider-contract verification with code-bug hunting, making the prompt harder to stabilize.
 
 ### 4. Write shared context to a file
 The CLI writes `shared-context.md` to the workspace so the agent prompt can reference it as a file instead of embedding large context in the prompt. This keeps prompts shorter and makes iteration easier.
@@ -173,6 +180,8 @@ Python is a good fit for GitHub API clients, file operations, and agent orchestr
 - **Local workspace can grow large.** → Default cleanup is enabled; retention is opt-in for debugging.
 - **GitHub App credentials are plaintext on the developer machine.** → Load from `.env` which is gitignored; never log tokens.
 - **One bad line location can still reach the diff validator if the parser is wrong.** → Use a real diff from GitHub and test the validator against already-merged PRs.
+- **API-reality agent depends on accurate provider contract summaries.** → Version the contract summaries with the project and update them when provider packages change. Ground every finding in the real provider docs.
+- **Two agents can disagree.** → The coordinator resolves overlaps; contradicted findings are dropped unless one side has strong evidence.
 
 ## Migration plan
 
