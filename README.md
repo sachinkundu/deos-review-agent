@@ -9,32 +9,23 @@ optional orchestration integration.
 
 ## Current phase
 
-**Phase 1 — Local CLI with one correctness agent**
+**Phase 1 — Local CLI with correctness and API-reality agents**
 
 - Fetch a PR diff via GitHub App installation token.
 - Clone the repository and check out the PR branch.
-- Run a correctness sub-agent and a coordinator.
+- Run a correctness sub-agent and an API-reality sub-agent concurrently.
+- Run a coordinator that deduplicates, filters, and rewrites findings.
 - Validate that every finding maps to a line in the PR diff.
 - Post the review as the GitHub App.
 
 See `openspec/changes/review-bot-phase-1/proposal.md` for the approved-scope
 proposal and `docs/review-bot-proposal.md` for background and learnings.
 
-## Repository layout
-
-```text
-openspec/                 OpenSpec planning artifacts
-  config.yaml             Project context and artifact rules
-  changes/review-bot-phase-1/
-    proposal.md
-    specs/                (created in the specs gate)
-    design.md             (created in the design gate)
-    tasks.md              (created in the implementation gate)
-docs/                     Background docs and learnings
-```
-
 ## Development notes
 
 - Python project managed with `uv`, `pyproject.toml`, `ruff`, `pyright`, and
   `pytest`.
 - GitHub App credentials and workspace paths live in the ignored local `.env`.
+- Install dev dependencies with `uv sync --extra dev`.
+- Run checks: `uv run pytest`, `uv run ruff check review_bot tests`,
+  `uv run pyright review_bot tests`.
