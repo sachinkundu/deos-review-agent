@@ -1,0 +1,55 @@
+name: eval
+
+on:
+  push:
+    branches: [main, review-bot-phase-1/impl]
+    paths:
+      - "review_bot/**"
+      - "eval/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+    branches: [main, review-bot-phase-1/impl]
+    paths:
+      - "review_bot/**"
+      - "eval/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.12.3"
+
+      - name: Write review-bot credentials
+        env:
+          APP_ID: ${{ secrets.REVIEW_BOT_APP_ID }}
+          INSTALLATION_ID: ${{ secrets.REVIEW_BOT_INSTALLATION_ID }}
+          PRIVATE_KEY: ${{ secrets.REVIEW_BOT_PRIVATE_KEY }}
+          BOT_USERNAME: ${{ secrets.REVIEW_BOT_BOT_USERNAME }}
+        run: |
+          cat > .env <<EOF
+          GITHUB_APP_ID=${APP_ID}
+          GITHUB_APP_INSTALLATION_ID=${INSTALLATION_ID}
+          GITHUB_APP_PRIVATE_KEY=/tmp/review-bot-key.pem
+          GITHUB_APP_BOT_USERNAME=${BOT_USERNAME}
+          REVIEW_WORKSPACE_ROOT=${{ runner.temp }}/review-bot-workspaces
+          EOF
+          printf '%s' "${PRIVATE_KEY}" > /tmp/review-bot-key.pem
+
+      - name: Run eval regression
+        run: uv run python eval/run.py
+
+      - name: Run unit tests
+        run: uv run pytest -q

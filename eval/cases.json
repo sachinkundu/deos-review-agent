@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "name": "phase-1-seeded-defects",
+      "url": "https://github.com/sachinkundu/deos-review-agent-eval/pull/1",
+      "description": "Pagination off-by-one and hallucinated GitHub webhook signature header.",
+      "expected_findings": [
+        {
+          "path": "eval_set/pagination.py",
+          "line": 13,
+          "line_tolerance": 2,
+          "side": "RIGHT",
+          "priority": 2,
+          "concepts": ["page", "limit", "skip", "offset", "first", "zero", "index", "1-indexed"],
+          "min_concepts": 3
+        },
+        {
+          "path": "eval_set/webhook.py",
+          "line": 17,
+          "line_tolerance": 2,
+          "side": "RIGHT",
+          "priority": 2,
+          "concepts": ["signature", "header", "github", "webhook", "x-hub-signature-256", "x-github-signature-sha256"],
+          "min_concepts": 3
+        }
+      ],
+      "max_findings": 4
+    }
+  ]
+}

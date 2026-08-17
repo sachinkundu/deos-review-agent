@@ -74,6 +74,12 @@ GitHub integration.
 - [~] 10.2 Capture screenshots of the GitHub App configuration, the PR review state, and the posted comments; attach the strongest available visual proof to the implementation PR (no browser screenshot tool available; provider-state captured via `gh api` in session transcript)
 - [x] 10.3 Keep `.env` and the App private key out of the repository; verify no secret appears in the diff, logs, or committed files
 
-## 11. Final PR
+## 11. Eval regression harness (added during implementation)
 
-- [ ] 11.1 Update all task checkboxes, cite the approved planning PR (#1), task IDs, and spec requirements in the PR body; include tests, evidence (local proof, provider-origin proof, API-captured review state), and mark ready for review
+- [x] 11.1 Create companion eval repo `sachinkundu/deos-review-agent-eval` with seeded-defect PR #1
+- [x] 11.2 Add `eval/` directory to the agent repo with concept-based eval cases and `eval/run.py` regression runner
+- [x] 11.3 Add `.github/workflows/eval.yml` CI so agent-code changes run the eval regression automatically
+
+## 12. Final PR
+
+- [ ] 12.1 Update all task checkboxes, cite the approved planning PR (#1), task IDs, and spec requirements in the PR body; include tests, evidence (local proof, provider-origin proof, API-captured review state), and mark ready for review

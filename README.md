@@ -21,6 +21,22 @@ optional orchestration integration.
 See `openspec/changes/review-bot-phase-1/proposal.md` for the approved-scope
 proposal and `docs/review-bot-proposal.md` for background and learnings.
 
+## Eval / regression
+
+The `eval/` directory contains live end-to-end cases run against real GitHub
+PRs in the companion repo `sachinkundu/deos-review-agent-eval`. The regression
+runner (`eval/run.py`) invokes the CLI in `--dry-run` mode and asserts that the
+agent still finds the expected defects on the expected diff lines.
+
+Run locally:
+
+```bash
+uv run python eval/run.py
+```
+
+`.github/workflows/eval.yml` runs the eval regression on every change to the
+agent code.
+
 ## Development notes
 
 - Python project managed with `uv`, `pyproject.toml`, `ruff`, `pyright`, and
