@@ -45,7 +45,7 @@ lockfiles) when behavior is version-specific.
   the diff. `line_range`: line numbers in the **new** (right-side) file, on
   lines present in the diff. `start` <= `end`.
 - `suggested_fix.description`: the correct API/field/header to use;
-  `replacement`: concrete code when you know it.
+  `replacement`: concrete code when you know it, otherwise an empty string.
 - `priority`: 0 = suggestion only, 1 = warning (likely misuse),
   2 = critical (guaranteed to fail at runtime or mis-validate signed payloads
   etc.).

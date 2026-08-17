@@ -33,7 +33,8 @@ Read `raw-findings.json` first.
      the diff. If a location is wrong, fix it to the correct diff line; if you
      cannot place it on a diff line, keep the best available diff line for the
      issue (the posting step decides whether it attaches).
-   - `suggested_fix`: description (plus replacement code when known)
+   - `suggested_fix`: description plus replacement code (empty string when no
+     single replacement applies)
 4. **Assign final severity** per finding: 0 = suggestion only,
    1 = warning (potential correctness issue), 2 = critical (definite bug or
    production-safety risk).

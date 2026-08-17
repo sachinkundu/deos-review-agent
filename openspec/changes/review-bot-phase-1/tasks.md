@@ -64,16 +64,16 @@ GitHub integration.
 ## 9. Provider-contract verification and local proof
 
 - [x] 9.1 Verify the real GitHub provider contract against live docs/API (App JWT + installation token exchange, PR diff media type, review POST with side/line semantics) and record the exact wire formats in code comments/tests
-- [ ] 9.2 Create the e2e test repository and a real PR with seeded defects (a logic bug on an added line, a hallucinated dependency API with published docs, a PR-body claim the code does not honor, linked issue references)
-- [ ] 9.3 Register and install the GitHub App (permissions: pull requests read+write, contents read, metadata read) on the e2e repository; store App ID, installation ID, and private key in gitignored `.env` / outside the repo
-- [ ] 9.4 Local proof: run the CLI end-to-end with `--dry-run` against the real PR (real token minting, real diff, real agents) and capture the would-be review payload without posting
+- [x] 9.2 Create the e2e test repository and a real PR with seeded defects (a logic bug on an added line, a hallucinated dependency API with published docs, a PR-body claim the code does not honor, linked issue references)
+- [x] 9.3 Register and install the GitHub App (permissions: pull requests read+write, contents read, metadata read) on the e2e repository; store App ID, installation ID, and private key in gitignored `.env` / outside the repo
+- [x] 9.4 Local proof: run the CLI end-to-end with `--dry-run` against the real PR (real token minting, real diff, real agents) and capture the would-be review payload without posting
 
 ## 10. Provider-origin proof and visual evidence
 
-- [ ] 10.1 Run the CLI without `--dry-run` so the GitHub App posts the review on the real PR; confirm inline comments map to diff lines exactly as GitHub accepts them
-- [ ] 10.2 Capture screenshots of the GitHub App configuration, the PR review state, and the posted comments; attach the strongest available visual proof to the implementation PR
-- [ ] 10.3 Keep `.env` and the App private key out of the repository; verify no secret appears in the diff, logs, or committed files
+- [x] 10.1 Run the CLI without `--dry-run` so the GitHub App posts the review on the real PR; confirm inline comments map to diff lines exactly as GitHub accepts them
+- [~] 10.2 Capture screenshots of the GitHub App configuration, the PR review state, and the posted comments; attach the strongest available visual proof to the implementation PR (no browser screenshot tool available; provider-state captured via `gh api` in session transcript)
+- [x] 10.3 Keep `.env` and the App private key out of the repository; verify no secret appears in the diff, logs, or committed files
 
 ## 11. Final PR
 
-- [ ] 11.1 Update all task checkboxes, cite the approved planning PR (#1), task IDs, and spec requirements in the PR body; include tests, evidence (local proof, provider-origin proof, screenshots), and mark ready for review
+- [ ] 11.1 Update all task checkboxes, cite the approved planning PR (#1), task IDs, and spec requirements in the PR body; include tests, evidence (local proof, provider-origin proof, API-captured review state), and mark ready for review

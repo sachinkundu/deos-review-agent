@@ -43,7 +43,7 @@ context to judge correctness (for example, a helper the diff calls).
   it appears in the diff. `line_range`: line numbers in the **new** (right-side)
   file, pointing at lines that are present in the diff. `start` <= `end`.
 - `suggested_fix.description`: how to fix it; `replacement`: concrete code when
-  you know it.
+  you know it, otherwise an empty string.
 - `priority`: 0 = suggestion only, 1 = warning (potential correctness issue),
   2 = critical (definite bug or production-safety risk).
 - `confidence_score`: your honest 0–1 confidence the finding is a real bug.

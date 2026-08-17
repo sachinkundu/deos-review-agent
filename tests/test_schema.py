@@ -132,6 +132,13 @@ def test_error_messages_list_all_problems():
     assert len(excinfo.value.errors) == 2
 
 
-def test_suggested_fix_replacement_optional():
-    finding = make_finding(replacement=None)
+def test_suggested_fix_replacement_may_be_empty():
+    finding = make_finding(replacement="")
     validate_review_output(make_review(findings=[finding]))
+
+
+def test_suggested_fix_replacement_required():
+    finding = make_finding()
+    finding["suggested_fix"].pop("replacement")
+    with pytest.raises(SchemaError, match="replacement"):
+        validate_review_output(make_review(findings=[finding]))

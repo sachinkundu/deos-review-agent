@@ -78,7 +78,7 @@
           "suggested_fix": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["description"],
+            "required": ["description", "replacement"],
             "properties": {
               "description": {
                 "type": "string",
@@ -86,7 +86,7 @@
               },
               "replacement": {
                 "type": "string",
-                "description": "Optional concrete replacement code."
+                "description": "Concrete replacement code; use an empty string when no single code replacement applies."
               }
             }
           }

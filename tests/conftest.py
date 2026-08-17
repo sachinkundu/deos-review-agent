@@ -43,7 +43,7 @@ def make_finding(
         },
         "suggested_fix": {
             "description": "Subtract one from the 1-indexed page before multiplying.",
-            **({"replacement": replacement} if replacement else {}),
+            "replacement": replacement if replacement else "",
         },
     }
 

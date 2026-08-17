@@ -178,15 +178,31 @@ class GitHubAppClient:
     def mint_installation_token(self, repository: str | None = None) -> str:
         """Exchange the App JWT for a short-lived installation token.
 
-        ``repository`` (``owner/repo``) scopes the token to that repository.
-        Raises CredentialsError on auth failure so the run fails fast.
+        ``repository`` (``owner/repo``) scopes the token to that repository when
+        the installation is configured for selected repositories. For
+        all-repositories installations, or when GitHub has not yet propagated
+        a newly created repo to the scoped-token path, we fall back to an
+        unscoped token. Raises CredentialsError on auth failure.
         """
         url = (
             f"{self._creds.base_url}/app/installations/{self._creds.installation_id}/access_tokens"
         )
-        body = {"repositories": [repository]} if repository else None
+
+        def _request(body: dict[str, Any] | None) -> requests.Response:
+            return self._session.post(url, headers=self._app_auth_headers(), json=body, timeout=30)
+
         try:
-            resp = self._session.post(url, headers=self._app_auth_headers(), json=body, timeout=30)
+            if repository:
+                resp = _request({"repositories": [repository]})
+                if resp.status_code == 201:
+                    token = resp.json().get("token")
+                    if token:
+                        return token
+                # Fall back to an unscoped token for all-repositories
+                # installations or when the repo is still propagating.
+                resp = _request(None)
+            else:
+                resp = _request(None)
         except requests.RequestException as e:
             raise GitHubError(f"installation token request failed: {e}") from e
         if resp.status_code != 201:
