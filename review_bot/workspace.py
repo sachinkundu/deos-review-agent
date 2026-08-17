@@ -90,6 +90,57 @@ def _tail(proc: subprocess.CompletedProcess) -> str:
     return (proc.stderr or proc.stdout or "").strip()[-1000:]
 
 
+# Environment keys that should never be forwarded to an untrusted bootstrap script.
+_SENSITIVE_ENV_KEYS: set[str] = {
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CODEX_API_KEY",
+    "REVIEW_BOT_PRIVATE_KEY",
+}
+
+
+def _bootstrap_env(extra_env: dict[str, str] | None) -> dict[str, str]:
+    """Build a sanitized environment for the consumer bootstrap script.
+
+    Copies standard non-secret variables (PATH, HOME, USER, SHELL, LANG, TZ,
+    etc.) and the review-specific non-secret variables, but drops any key that
+    looks like a credential.
+    """
+    safe_keys = {
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "PWD",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "REVIEW_PR_URL",
+        "REVIEW_HEAD_SHA",
+        "REVIEW_PR_NUMBER",
+    }
+    env = {k: v for k, v in os.environ.items() if k in safe_keys}
+    env.update(extra_env or {})
+    # Also drop any extra_env key that matches a sensitive pattern.
+    for key in list(env.keys()):
+        upper = key.upper()
+        if upper in _SENSITIVE_ENV_KEYS or any(
+            pattern in upper for pattern in ("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL")
+        ):
+            env.pop(key, None)
+    return env
+
+
 class PRWorkspace:
     """A workspace bound to one PR under the configured root."""
 
@@ -134,6 +185,7 @@ class PRWorkspace:
                     f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
                 ],
                 cwd=self.workdir,
+                env=git_env,
             )
             if fetch.returncode != 0:
                 raise WorkspaceError(f"git fetch of PR branch {branch!r} failed: {_tail(fetch)}")
@@ -142,7 +194,9 @@ class PRWorkspace:
             # not reachable from the branch tip).
             exists = _git(["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=self.workdir)
             if exists.returncode != 0:
-                by_sha = _git(["fetch", "--quiet", "origin", head_sha], cwd=self.workdir)
+                by_sha = _git(
+                    ["fetch", "--quiet", "origin", head_sha], cwd=self.workdir, env=git_env
+                )
                 if by_sha.returncode != 0:
                     raise WorkspaceError(
                         f"head SHA {head_sha} could not be fetched: {_tail(by_sha)}"
@@ -164,12 +218,16 @@ class PRWorkspace:
     def run_bootstrap(
         self, workdir: Path, extra_env: dict[str, str] | None = None
     ) -> BootstrapResult:
-        """Run the consumer-provided bootstrap script when present."""
+        """Run the consumer-provided bootstrap script when present.
+
+        The script receives a sanitized environment that excludes App private
+        keys, API tokens, and other credentials. It can still read PATH, HOME,
+        and review metadata, but cannot exfiltrate host secrets.
+        """
         script = workdir / BOOTSTRAP_SCRIPT
         if not script.exists():
             return BootstrapResult(ran=False, ok=True)
-        env = dict(os.environ)
-        env.update(extra_env or {})
+        env = _bootstrap_env(extra_env)
         try:
             proc = subprocess.run(
                 ["bash", str(script)],

@@ -365,6 +365,7 @@ def build_inline_comments(attachable: list[tuple[dict, int]]) -> list[dict]:
         }
         if end > start:
             comment["start_line"] = start
+            comment["start_side"] = "RIGHT"
         comments.append(comment)
     return comments
 

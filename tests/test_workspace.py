@@ -124,6 +124,54 @@ def test_run_bootstrap_missing_is_noop(local_clone_url, head_sha, workspace):
     assert result.ok
 
 
+def test_run_bootstrap_sanitizes_env(local_clone_url, head_sha, workspace, monkeypatch):
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "/secret/key.pem")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("REVIEW_PR_URL", "https://example.com/pr/1")
+    workdir = workspace.setup(local_clone_url, head_sha, "feature", token="fake-token")
+    script = workdir / ".review-bot"
+    script.mkdir()
+    (script / "bootstrap.sh").write_text(
+        "#!/bin/bash\n"
+        'echo "PRIVATE_KEY=$GITHUB_APP_PRIVATE_KEY"\n'
+        'echo "OPENAI_API_KEY=$OPENAI_API_KEY"\n'
+        'echo "PR_URL=$REVIEW_PR_URL"\n',
+        encoding="utf-8",
+    )
+    result = workspace.run_bootstrap(workdir)
+    assert result.ok
+    assert "PRIVATE_KEY=" in result.output_tail
+    assert "sk-secret" not in result.output_tail
+    assert "PR_URL=https://example.com/pr/1" in result.output_tail
+
+
+def test_setup_passes_auth_env_to_all_fetches(local_clone_url, head_sha, workspace):
+    calls = []
+
+    def _capture_git(args, cwd, env=None):
+        calls.append((args, env))
+        stdout = ""
+        if args == ["rev-parse", "HEAD"]:
+            stdout = head_sha
+        return subprocess.CompletedProcess(args, returncode=0, stdout=stdout, stderr="")
+
+    from review_bot import workspace as workspace_mod
+
+    original_git = workspace_mod._git
+    workspace_mod._git = _capture_git
+    try:
+        workspace.setup(local_clone_url, head_sha, "feature", token="fake-token")
+    finally:
+        workspace_mod._git = original_git
+
+    fetch_calls = [c for c in calls if c[0][:2] == ["fetch", "--quiet"]]
+    assert len(fetch_calls) >= 1
+    for _args, env in fetch_calls:
+        assert env is not None
+        assert env.get("GIT_ASKPASS")
+        assert env.get("RB_GIT_TOKEN") == "fake-token"
+
+
 def test_remove_cleans_workspace(local_clone_url, head_sha, workspace):
     workspace.setup(local_clone_url, head_sha, "feature", token="fake-token")
     assert workspace.workdir.exists()

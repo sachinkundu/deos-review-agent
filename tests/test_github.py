@@ -262,6 +262,17 @@ def test_post_review(rsa_pem):
     assert comments[0]["side"] == "RIGHT"
 
 
+def test_build_inline_comments_includes_start_side_for_multiline():
+    from review_bot.github import build_inline_comments
+
+    finding = make_finding(path="a.py", start=3, end=7)
+    comments = build_inline_comments([(finding, 0)])
+    assert comments[0]["path"] == "a.py"
+    assert comments[0]["line"] == 7
+    assert comments[0]["start_line"] == 3
+    assert comments[0]["start_side"] == "RIGHT"
+
+
 def test_post_review_surfaces_provider_error(rsa_pem):
     key_path, _ = rsa_pem
     session = FakeSession()
