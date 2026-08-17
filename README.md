@@ -21,34 +21,6 @@ optional orchestration integration.
 See `openspec/changes/review-bot-phase-1/proposal.md` for the approved-scope
 proposal and `docs/review-bot-proposal.md` for background and learnings.
 
-## Repository layout
-
-```text
-review_bot/               Python package for the review bot
-  review.py               CLI entrypoint and end-to-end pipeline
-  github.py               GitHub App auth, PR fetch, review POST
-  workspace.py            Clone/checkout/bootstrap/cleanup
-  shared_context.py       Assemble shared-context.md for agents
-  diff_validator.py       Parse diff and validate finding locations
-  schema.py / schema.json Review output schema and validation
-  coordinator.py          Coordinator agent wiring
-  agents/
-    runner.py             Agent runner abstraction and codex driver
-  prompts/
-    correctness.md        Correctness agent prompt
-    api-reality.md        API-reality agent prompt
-    coordinator.md        Coordinator prompt
-tests/                    Deterministic pytest suite
-openspec/                 OpenSpec planning artifacts
-  config.yaml             Project context and artifact rules
-  changes/review-bot-phase-1/
-    proposal.md
-    specs/                (created in the specs gate)
-    design.md             (created in the design gate)
-    tasks.md              (created in the implementation gate)
-docs/                     Background docs and learnings
-```
-
 ## Development notes
 
 - Python project managed with `uv`, `pyproject.toml`, `ruff`, `pyright`, and

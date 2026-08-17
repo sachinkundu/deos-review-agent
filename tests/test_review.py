@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from review_bot.github import Credentials, GitHubAppClient, PRInfo
-from review_bot.review import build_review_body, run_review
+from review_bot.review import _load_prompt, build_review_body, run_review
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
 
@@ -20,6 +20,13 @@ def _env(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "456")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", str(key))
     monkeypatch.setenv("GITHUB_APP_BOT_USERNAME", "review-bot[bot]")
+
+
+def test_load_prompt_includes_shared_rules():
+    text = _load_prompt("correctness.md")
+    assert "Shared rules for all review agents" in text
+    assert "Exactly one issue per finding" in text
+    assert "Correctness review agent" in text
 
 
 def _make_pr(**overrides) -> PRInfo:

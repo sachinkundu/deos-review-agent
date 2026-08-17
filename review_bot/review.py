@@ -26,6 +26,7 @@ from .agents.runner import (
     DEFAULT_AGENT_TIMEOUT,
     AgentRunner,
     CodexAgentRunner,
+    PiAgentRunner,
     run_agents_concurrently,
 )
 from .coordinator import CoordinatorError, run_coordinator, write_raw_findings
@@ -39,7 +40,7 @@ from .github import (
     event_for_findings,
     parse_pr_url,
 )
-from .schema import SchemaError, load_schema, validate_review_output
+from .schema import SchemaError, validate_review_output
 from .shared_context import write_shared_context
 from .workspace import DEFAULT_BOOTSTRAP_TIMEOUT, PRWorkspace, WorkspaceError
 
@@ -96,7 +97,9 @@ def build_credentials() -> Credentials:
 
 
 def _load_prompt(name: str) -> str:
-    return (PROMPTS_DIR / name).read_text(encoding="utf-8")
+    text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+    shared = (PROMPTS_DIR / "shared-rules.md").read_text(encoding="utf-8")
+    return text.replace("{{shared_rules}}", shared)
 
 
 def build_review_body(
@@ -171,14 +174,26 @@ class RunOptions:
         )
         self.model: str | None = args.model or os.environ.get("REVIEW_AGENT_MODEL") or None
         self.agent_command: str = (
-            args.agent_command or os.environ.get("REVIEW_AGENT_COMMAND") or "codex"
+            args.agent_command or os.environ.get("REVIEW_AGENT_COMMAND") or "pi"
         )
+        self.agent_thinking: str | None = (
+            args.agent_thinking or os.environ.get("REVIEW_AGENT_THINKING") or "high"
+        )
+
+
+def build_agent_runner(
+    command: str, model: str | None, thinking: str | None, timeout: int
+) -> AgentRunner:
+    """Construct the agent runner for ``command``."""
+    if command == "codex":
+        return CodexAgentRunner(command=command, model=model, timeout=timeout)
+    return PiAgentRunner(command=command, model=model, thinking=thinking, timeout=timeout)
 
 
 def run_review(
     argv: list[str],
     client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
-    runner_factory: Callable[..., AgentRunner] = CodexAgentRunner,
+    runner_factory: Callable[..., AgentRunner] = build_agent_runner,
     workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
 ) -> int:
     parser = argparse.ArgumentParser(prog="review-bot", description="Review a GitHub PR (Phase 1).")
@@ -198,6 +213,11 @@ def run_review(
         "--bootstrap-timeout", type=int, default=None, help="bootstrap timeout in seconds"
     )
     parser.add_argument("--model", default=None, help="model override for the agent driver")
+    parser.add_argument(
+        "--agent-thinking",
+        default=None,
+        help="thinking level for pi driver (off/minimal/low/medium/high/xhigh/max)",
+    )
     parser.add_argument("--agent-command", default=None, help="agent CLI command (default: codex)")
     args = parser.parse_args(argv)
 
@@ -268,9 +288,11 @@ def run_review(
 
         write_shared_context(workspace.workdir, pr, diff_text, bootstrap)
 
-        schema = load_schema()
         runner = runner_factory(
-            schema=schema, timeout=opts.agent_timeout, model=opts.model, command=opts.agent_command
+            command=opts.agent_command,
+            model=opts.model,
+            thinking=opts.agent_thinking,
+            timeout=opts.agent_timeout,
         )
         try:
             specs = [

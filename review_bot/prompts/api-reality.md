@@ -3,14 +3,7 @@
 You are reviewing a pull request for **provider API reality only**: does the
 changed code use the real, published APIs of its dependencies?
 
-## Inputs
-
-- `shared-context.md` — PR title, body, changed files, and repository context.
-- `review-diff.diff` — the full unified diff of the PR.
-
-Read both files first. Read other files (dependency manifests, lockfiles,
-import statements) to determine which dependencies and which versions the
-project actually uses.
+{{shared_rules}}
 
 ## What to flag (only these)
 
@@ -35,31 +28,7 @@ lockfiles) when behavior is version-specific.
 - APIs you could not verify: if you cannot find the documentation, do not
   speculate — skip it.
 
-## Rules for every finding
+## Additional rule for API-reality findings
 
-- Exactly one issue per finding.
-- `body` MUST cite the **published documentation URL** that contradicts the
-  code, plus the concrete **failure scenario** (what breaks at runtime and
-  why), and the suggested correction.
-- `code_location.absolute_file_path`: repository-relative path exactly as in
-  the diff. `line_range`: line numbers in the **new** (right-side) file, on
-  lines present in the diff. `start` <= `end`.
-- `suggested_fix.description`: the correct API/field/header to use;
-  `replacement`: concrete code when you know it, otherwise an empty string.
-- `priority`: 0 = suggestion only, 1 = warning (likely misuse),
-  2 = critical (guaranteed to fail at runtime or mis-validate signed payloads
-  etc.).
-- `confidence_score`: your honest 0–1 confidence, after checking the docs.
-
-## Verdict
-
-- `overall_correctness`: "patch is incorrect" if you emitted any finding, else
-  "patch is correct".
-- `overall_explanation`: one paragraph: which dependencies you verified against
-  which documentation, and what you found.
-- `status`: "no_further_concerns" for this single-pass review.
-
-## Output
-
-Respond with **only** the JSON object matching the provided schema. No prose
-before or after.
+Every finding's `body` MUST cite the **published documentation URL** that
+contradicts the changed code.

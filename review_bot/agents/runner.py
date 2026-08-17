@@ -1,14 +1,16 @@
 """Agent runner: drives an LLM agent CLI with a prompt and a JSON schema.
 
 The wiring is provider-agnostic: any CLI that accepts a prompt and returns the
-final message as JSON works. The default driver is ``codex exec`` (read-only
-sandbox, structured final message via ``--output-schema``). Tests inject a
-fake runner so no live model calls happen in the test suite.
+final message as JSON works. The default driver is ``pi`` (the local pi coding
+agent); ``codex exec`` is also supported. Tests inject a fake runner so no live
+model calls happen in the test suite.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +21,41 @@ from pathlib import Path
 from ..schema import SchemaError, validate_review_output
 
 DEFAULT_AGENT_TIMEOUT = 1800
+
+
+def _extract_json(text: str) -> dict:
+    """Extract the first JSON object from agent output.
+
+    Models sometimes wrap JSON in markdown fences or add explanatory prose;
+    this finds the outermost ``{...}`` object.
+    """
+    # Try the whole text first.
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        # Find the matching closing brace by counting braces.
+        depth = 0
+        for i, ch in enumerate(stripped):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(stripped[: i + 1])
+
+    # Fallback: look for a fenced JSON block.
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", stripped, re.DOTALL)
+    if fence_match:
+        return json.loads(fence_match.group(1))
+
+    raise ValueError("no JSON object found in agent output")
+
+
+def _validate(name: str, data: dict) -> AgentResult:
+    try:
+        validate_review_output(data)
+    except SchemaError as e:
+        return AgentResult(name=name, ok=False, error=f"agent output failed schema validation: {e}")
+    return AgentResult(name=name, ok=True, output=data)
 
 
 @dataclass
@@ -144,11 +181,89 @@ class CodexAgentRunner(AgentRunner):
         except json.JSONDecodeError as e:
             return AgentResult(name=name, ok=False, error=f"agent output is not valid JSON: {e}")
 
+        return _validate(name, data)
+
+
+class PiAgentRunner(AgentRunner):
+    """Runs agents through the local ``pi`` coding agent.
+
+    Flags used:
+      --print               non-interactive, process prompt and exit
+      --no-session          ephemeral, no session file persisted
+      --mode text           plain text output (we extract JSON ourselves)
+      --thinking <level>    thinking effort (off/minimal/low/medium/high/xhigh/max)
+      --model <pattern>     provider/model pattern, e.g. hetzner/kimi-k2.7-code
+      --system-prompt FILE  system prompt loaded from a file
+      @FILE                 include a workspace file as context
+    """
+
+    def __init__(
+        self,
+        command: str = "pi",
+        model: str | None = None,
+        thinking: str | None = None,
+        timeout: int = DEFAULT_AGENT_TIMEOUT,
+    ):
+        self.command = command
+        self.model = model
+        self.thinking = thinking
+        self.timeout = timeout
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="review-bot-agent-"))
+
+    def close(self) -> None:
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+        prompt_file = self._tmpdir / f"{name}-prompt.md"
+        prompt_file.write_text(prompt, encoding="utf-8")
+
+        # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
+        per_agent_key = f"REVIEW_{name.upper().replace('-', '_')}_THINKING"
+        thinking = os.environ.get(per_agent_key) or self.thinking
+
+        cmd = [
+            self.command,
+            "--print",
+            "--no-session",
+            "--mode",
+            "text",
+        ]
+        if thinking:
+            cmd += ["--thinking", thinking]
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd += [
+            "--system-prompt",
+            str(prompt_file),
+            "@shared-context.md",
+            "@review-diff.diff",
+        ]
+
         try:
-            validate_review_output(data)
-        except SchemaError as e:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                cwd=str(workdir),
+            )
+        except subprocess.TimeoutExpired:
+            return AgentResult(name=name, ok=False, error=f"agent timed out after {self.timeout}s")
+        except FileNotFoundError as e:
             return AgentResult(
-                name=name, ok=False, error=f"agent output failed schema validation: {e}"
+                name=name, ok=False, error=f"agent command not found: {self.command!r} ({e})"
             )
 
-        return AgentResult(name=name, ok=True, output=data)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-800:]
+            return AgentResult(name=name, ok=False, error=f"agent exited {proc.returncode}: {tail}")
+
+        try:
+            data = _extract_json(proc.stdout)
+        except (json.JSONDecodeError, ValueError) as e:
+            tail = proc.stdout.strip()[-800:]
+            return AgentResult(
+                name=name, ok=False, error=f"agent output is not valid JSON: {e} ({tail})"
+            )
+
+        return _validate(name, data)

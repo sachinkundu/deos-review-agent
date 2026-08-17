@@ -8,6 +8,7 @@ from pathlib import Path
 from review_bot.agents.runner import (
     AgentResult,
     CodexAgentRunner,
+    PiAgentRunner,
     run_agents_concurrently,
 )
 from tests.conftest import FakeAgentRunner, make_review
@@ -62,6 +63,24 @@ def test_codex_runner_command_builds(tmp_path: Path):
         assert json.loads(runner._schema_file.read_text(encoding="utf-8")) == schema
     finally:
         runner.close()
+
+
+def test_pi_runner_command_builds():
+    runner = PiAgentRunner(command="pi", model="hetzner/kimi-k2.7-code", thinking="high")
+    try:
+        assert runner.command == "pi"
+        assert runner.model == "hetzner/kimi-k2.7-code"
+        assert runner.thinking == "high"
+    finally:
+        runner.close()
+
+
+def test_pi_runner_extracts_json_from_markdown():
+    from review_bot.agents.runner import _extract_json
+
+    text = "Here is the review:\n```json\n" + json.dumps(make_review(findings=[])) + "\n```"
+    data = _extract_json(text)
+    assert data["status"] == "no_further_concerns"
 
 
 def test_codex_runner_validates_output(tmp_path: Path):
