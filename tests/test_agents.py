@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from review_bot.agents.runner import (
@@ -71,6 +72,7 @@ def test_pi_runner_command_builds():
         assert runner.command == "pi"
         assert runner.model == "hetzner/kimi-k2.7-code"
         assert runner.thinking == "high"
+        assert runner.persist_session
     finally:
         runner.close()
 
@@ -81,6 +83,60 @@ def test_pi_runner_extracts_json_from_markdown():
     text = "Here is the review:\n```json\n" + json.dumps(make_review(findings=[])) + "\n```"
     data = _extract_json(text)
     assert data["status"] == "no_further_concerns"
+
+
+def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path):
+    invalid = make_review()
+    invalid["findings"][0]["title"] = "x" * 81
+    repaired = make_review()
+    repaired["findings"][0]["title"] = "x" * 80
+    responses = iter([invalid, repaired])
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, returncode=0, stdout=json.dumps(next(responses)), stderr=""
+        )
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    runner = PiAgentRunner(command="pi", thinking="high")
+    try:
+        result = runner.run("coordinator", "original prompt", tmp_path)
+        repair_prompt = Path(
+            commands[1][commands[1].index("--system-prompt") + 1]
+        ).read_text(encoding="utf-8")
+    finally:
+        runner.close()
+
+    assert result.ok
+    assert len(commands) == 2
+    assert "--no-session" not in commands[0]
+    assert commands[0][commands[0].index("--name") + 1] == "review-bot-coordinator"
+    assert "Schema repair" in repair_prompt
+    assert "is too long" in repair_prompt
+    assert "x" * 81 in repair_prompt
+
+
+def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
+        )
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    runner = PiAgentRunner(command="pi", persist_session=False)
+    try:
+        result = runner.run("correctness", "prompt", tmp_path)
+    finally:
+        runner.close()
+
+    assert result.ok
+    assert "--no-session" in commands[0]
+    assert "--name" not in commands[0]
 
 
 def test_codex_runner_validates_output(tmp_path: Path):

@@ -54,7 +54,12 @@ def _validate(name: str, data: dict) -> AgentResult:
     try:
         validate_review_output(data)
     except SchemaError as e:
-        return AgentResult(name=name, ok=False, error=f"agent output failed schema validation: {e}")
+        return AgentResult(
+            name=name,
+            ok=False,
+            error=f"agent output failed schema validation: {e}",
+            extra={"invalid_output": data},
+        )
     return AgentResult(name=name, ok=True, output=data)
 
 
@@ -189,7 +194,8 @@ class PiAgentRunner(AgentRunner):
 
     Flags used:
       --print               non-interactive, process prompt and exit
-      --no-session          ephemeral, no session file persisted
+      --name NAME           label the persisted session by review stage
+      --no-session          optional ephemeral mode when explicitly requested
       --mode text           plain text output (we extract JSON ourselves)
       --thinking <level>    thinking effort (off/minimal/low/medium/high/xhigh/max)
       --model <pattern>     provider/model pattern, e.g. hetzner/kimi-k2.7-code
@@ -203,20 +209,19 @@ class PiAgentRunner(AgentRunner):
         model: str | None = None,
         thinking: str | None = None,
         timeout: int = DEFAULT_AGENT_TIMEOUT,
+        persist_session: bool = True,
     ):
         self.command = command
         self.model = model
         self.thinking = thinking
         self.timeout = timeout
+        self.persist_session = persist_session
         self._tmpdir = Path(tempfile.mkdtemp(prefix="review-bot-agent-"))
 
     def close(self) -> None:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
-        prompt_file = self._tmpdir / f"{name}-prompt.md"
-        prompt_file.write_text(prompt, encoding="utf-8")
-
+    def _run_once(self, name: str, prompt_file: Path, workdir: Path) -> AgentResult:
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
         per_agent_key = f"REVIEW_{name.upper().replace('-', '_')}_THINKING"
         thinking = os.environ.get(per_agent_key) or self.thinking
@@ -224,10 +229,13 @@ class PiAgentRunner(AgentRunner):
         cmd = [
             self.command,
             "--print",
-            "--no-session",
             "--mode",
             "text",
         ]
+        if self.persist_session:
+            cmd += ["--name", f"review-bot-{name}"]
+        else:
+            cmd.append("--no-session")
         if thinking:
             cmd += ["--thinking", thinking]
         if self.model:
@@ -267,3 +275,28 @@ class PiAgentRunner(AgentRunner):
             )
 
         return _validate(name, data)
+
+    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+        prompt_file = self._tmpdir / f"{name}-prompt.md"
+        prompt_file.write_text(prompt, encoding="utf-8")
+
+        result = self._run_once(name, prompt_file, workdir)
+        invalid_output = result.extra.get("invalid_output")
+        if result.ok or invalid_output is None:
+            return result
+
+        repair_prompt = (
+            f"{prompt}\n\n"
+            "## Schema repair\n\n"
+            "Your previous JSON response contained the completed review but failed schema "
+            "validation. Correct only its structure and constrained values; preserve the "
+            "substantive findings and verdict. Return only the complete corrected JSON object.\n\n"
+            f"Validation errors:\n{result.error}\n\n"
+            f"Previous JSON:\n```json\n{json.dumps(invalid_output, ensure_ascii=False)}\n```\n"
+        )
+        repair_prompt_file = self._tmpdir / f"{name}-repair-prompt.md"
+        repair_prompt_file.write_text(repair_prompt, encoding="utf-8")
+        repaired = self._run_once(name, repair_prompt_file, workdir)
+        if not repaired.ok:
+            repaired.error = f"{result.error}; schema repair failed: {repaired.error}"
+        return repaired

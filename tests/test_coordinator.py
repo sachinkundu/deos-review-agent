@@ -38,6 +38,13 @@ def test_load_coordinator_prompt_exists():
     assert "raw-findings.json" in text
 
 
+def test_load_coordinator_prompt_expands_shared_output_contract():
+    text = load_coordinator_prompt()
+    assert "{{shared_rules}}" not in text
+    assert "Shared rules for all review agents" in text
+    assert "`overall_confidence_score`" in text
+
+
 def test_run_coordinator_success(tmp_path: Path):
     final = make_review(findings=[make_finding(priority=1)])
     runner = FakeAgentRunner({"coordinator": final})

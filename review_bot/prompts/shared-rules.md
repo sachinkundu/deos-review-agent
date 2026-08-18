@@ -39,9 +39,12 @@ that do not translate into a concrete bug.
 - `overall_correctness`: "patch is incorrect" if you emitted any finding, else
   "patch is correct".
 - `overall_explanation`: one paragraph summarizing what you checked and found.
+- `overall_confidence_score`: your honest 0–1 confidence in the overall verdict.
 - `status`: "no_further_concerns" for this single-pass review.
 
 ### Output
 
-Respond with **only** the JSON object matching the provided schema. No prose
-before or after.
+Respond with **only** the JSON object matching the provided schema. The
+top-level object must contain exactly these fields: `findings`,
+`overall_correctness`, `overall_explanation`, `overall_confidence_score`, and
+`status`. No prose before or after.

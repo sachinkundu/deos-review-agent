@@ -1,7 +1,7 @@
 """review_bot CLI entrypoint: wires the Phase 1 review pipeline.
 
 Usage:
-    review-bot <PR_URL> [--dry-run] [--keep-workspace] [options]
+    review-bot <PR_URL> [--dry-run] [--keep-workspace] [--no-agent-session] [options]
     review-bot cleanup <PR_URL>
 
 Flow: load credentials -> mint installation token (one per run) -> fetch PR
@@ -179,15 +179,26 @@ class RunOptions:
         self.agent_thinking: str | None = (
             args.agent_thinking or os.environ.get("REVIEW_AGENT_THINKING") or "high"
         )
+        self.persist_agent_session: bool = not args.no_agent_session
 
 
 def build_agent_runner(
-    command: str, model: str | None, thinking: str | None, timeout: int
+    command: str,
+    model: str | None,
+    thinking: str | None,
+    timeout: int,
+    persist_session: bool = True,
 ) -> AgentRunner:
     """Construct the agent runner for ``command``."""
     if command == "codex":
         return CodexAgentRunner(command=command, model=model, timeout=timeout)
-    return PiAgentRunner(command=command, model=model, thinking=thinking, timeout=timeout)
+    return PiAgentRunner(
+        command=command,
+        model=model,
+        thinking=thinking,
+        timeout=timeout,
+        persist_session=persist_session,
+    )
 
 
 def run_review(
@@ -204,6 +215,11 @@ def run_review(
     )
     parser.add_argument(
         "--keep-workspace", action="store_true", help="retain the PR workspace after the run"
+    )
+    parser.add_argument(
+        "--no-agent-session",
+        action="store_true",
+        help="do not persist Pi agent session transcripts",
     )
     parser.add_argument(
         "--workspace-root", default=None, help=f"workspace root (default {DEFAULT_WORKSPACE_ROOT})"
@@ -293,6 +309,7 @@ def run_review(
             model=opts.model,
             thinking=opts.agent_thinking,
             timeout=opts.agent_timeout,
+            persist_session=opts.persist_agent_session,
         )
         try:
             specs = [

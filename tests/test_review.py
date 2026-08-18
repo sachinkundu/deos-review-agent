@@ -8,6 +8,7 @@ import pytest
 
 from review_bot.github import Credentials, GitHubAppClient, PRInfo
 from review_bot.review import _load_prompt, build_review_body, run_review
+from review_bot.schema import load_schema
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
 
@@ -27,6 +28,12 @@ def test_load_prompt_includes_shared_rules():
     assert "Shared rules for all review agents" in text
     assert "Exactly one issue per finding" in text
     assert "Correctness review agent" in text
+
+
+def test_load_prompt_names_every_required_top_level_output_field():
+    text = _load_prompt("correctness.md")
+    for field in load_schema()["required"]:
+        assert f"`{field}`" in text
 
 
 def _make_pr(**overrides) -> PRInfo:

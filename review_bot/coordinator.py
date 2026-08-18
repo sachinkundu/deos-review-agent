@@ -46,7 +46,9 @@ def write_raw_findings(workdir: Path, results: list[AgentResult]) -> Path:
 
 
 def load_coordinator_prompt() -> str:
-    return (PROMPTS_DIR / "coordinator.md").read_text(encoding="utf-8")
+    text = (PROMPTS_DIR / "coordinator.md").read_text(encoding="utf-8")
+    shared = (PROMPTS_DIR / "shared-rules.md").read_text(encoding="utf-8")
+    return text.replace("{{shared_rules}}", shared)
 
 
 def run_coordinator(runner: AgentRunner, workdir: Path) -> dict:
