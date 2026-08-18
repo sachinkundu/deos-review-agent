@@ -5,11 +5,15 @@ Provide a narrowly scoped safety review for high-confidence hardcoded-secret exp
 ## ADDED Requirements
 
 ### Requirement: Safety review agent produces structured findings
-The system SHALL run a safety review agent that reads the shared review context and filtered diff and emits output matching the shared review schema.
+The system SHALL run a safety review agent that reads the shared review context and the complete provider-originated diff and emits output matching the shared review schema.
 
 #### Scenario: Safety review completes
 - **WHEN** the safety review agent finishes analyzing a pull request
 - **THEN** it returns structured findings, an overall verdict and explanation, confidence scores, and a status field
+
+#### Scenario: Another agent's input excludes a file
+- **WHEN** a changed file is excluded from the correctness, API-reality, and tests agent-review diff
+- **THEN** the safety agent still receives that file's complete patch in the provider-originated diff
 
 #### Scenario: Safety review output is invalid
 - **WHEN** the safety review agent returns output that does not match the shared review schema

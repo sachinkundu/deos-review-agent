@@ -1,5 +1,7 @@
 ## MODIFIED Requirements
 
+This delta expands the existing Phase 1 pipeline rather than introducing a new pipeline. Unchanged concurrency and partial-failure scenarios are repeated because an OpenSpec modified requirement replaces the complete existing requirement block when archived.
+
 ### Requirement: Run review agents concurrently
 The system SHALL run the correctness, API-reality, tests, and safety review agents concurrently for every review.
 
@@ -7,20 +9,16 @@ The system SHALL run the correctness, API-reality, tests, and safety review agen
 - **WHEN** the agent pipeline begins
 - **THEN** the correctness, API-reality, tests, and safety agents all receive their inputs and run in parallel
 
-#### Scenario: Pull request size or path varies
-- **WHEN** the pull request has any diff size or changed-file path composition
-- **THEN** the pipeline runs all four agents without assigning a risk tier or conditionally selecting an agent roster
-
 #### Scenario: One agent fails
 - **WHEN** one review agent fails or returns invalid output
 - **THEN** the pipeline reports the failure in the review summary, continues with findings from any successful agents, and does not stop the whole run
 
 ### Requirement: Feed all findings to the coordinator
-The system SHALL pass the findings from every successful correctness, API-reality, tests, and safety review agent to the coordinator with the source agent identified.
+The system SHALL pass the findings from every successful correctness, API-reality, tests, and safety review agent to the coordinator.
 
-#### Scenario: Findings from all four agents
-- **WHEN** all four review agents emit findings
-- **THEN** the coordinator receives the combined set with each finding attributed to its source agent
+#### Scenario: New agents emit findings
+- **WHEN** the tests or safety agent emits findings
+- **THEN** the coordinator receives those findings together with findings from the successful correctness and API-reality agents
 
 #### Scenario: Successful agent produced no findings
 - **WHEN** one or more successful review agents returns a valid empty findings list
