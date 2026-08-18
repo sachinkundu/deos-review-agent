@@ -1,3 +1,3 @@
-"""review_bot: correctness-focused PR review bot (Phase 1 local CLI)."""
+"""review_bot: focused four-agent PR review bot (Phase 2 local CLI)."""
 
 __version__ = "0.1.0"

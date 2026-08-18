@@ -32,6 +32,25 @@ def test_write_raw_findings(tmp_path: Path):
     assert data["agents"][1]["error"] == "timeout"
 
 
+def test_write_raw_findings_keeps_roster_order_and_empty_successes(tmp_path: Path):
+    empty = make_review(findings=[])
+    results = [
+        AgentResult(name="correctness", ok=True, output=empty),
+        AgentResult(name="api-reality", ok=False, error="timeout"),
+        AgentResult(name="tests", ok=True, output=empty),
+        AgentResult(name="safety", ok=True, output=empty),
+    ]
+    data = __import__("json").loads(write_raw_findings(tmp_path, results).read_text())
+    assert [entry["agent"] for entry in data["agents"]] == [
+        "correctness",
+        "api-reality",
+        "tests",
+        "safety",
+    ]
+    assert data["agents"][0]["findings"] == []
+    assert data["agents"][2]["findings"] == []
+
+
 def test_load_coordinator_prompt_exists():
     text = load_coordinator_prompt()
     assert "coordinator" in text.lower()
@@ -51,6 +70,11 @@ def test_run_coordinator_success(tmp_path: Path):
     review = run_coordinator(runner, tmp_path)
     validate_review_output(review)
     assert review["findings"][0]["priority"] == 1
+    assert runner.specs[0].input_files == (
+        "shared-context.md",
+        "raw-findings.json",
+        "provider-diff.diff",
+    )
 
 
 def test_run_coordinator_failure(tmp_path: Path):

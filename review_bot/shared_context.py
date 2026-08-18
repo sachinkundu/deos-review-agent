@@ -1,29 +1,27 @@
 """Assemble the shared context document for review agents.
 
-The shared context is written to a file in the workspace so agent prompts can
-reference it instead of embedding large context in every prompt (design
-decision: shared context file).
+The shared context is written once so each role can reuse PR metadata while
+receiving its explicitly assigned full or filtered diff artifact.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from .diff_filter import FILTER_MANIFEST_NAME, PROVIDER_DIFF_NAME, REVIEW_DIFF_NAME
 from .github import PRInfo, extract_linked_issue_references
 from .workspace import BootstrapResult
 
 SHARED_CONTEXT_NAME = "shared-context.md"
-DIFF_NAME = "review-diff.diff"
 
 
 def write_shared_context(
     workdir: Path,
     pr: PRInfo,
-    diff_text: str,
     bootstrap: BootstrapResult | None = None,
     linked_references: list[str] | None = None,
 ) -> Path:
-    """Write ``shared-context.md`` and ``review-diff.diff`` into the workspace."""
+    """Write shared PR metadata and describe the separately built diff views."""
     linked = (
         linked_references
         if linked_references is not None
@@ -67,11 +65,20 @@ def write_shared_context(
 
     lines.append("## Inputs for this review")
     lines.append(f"- This file: `{SHARED_CONTEXT_NAME}`")
-    lines.append(f"- Full PR diff (unified): `{DIFF_NAME}`")
+    lines.append(
+        f"- Complete provider-originated PR diff: `{PROVIDER_DIFF_NAME}` "
+        "(safety, coordination, and line validation)"
+    )
+    lines.append(
+        f"- Filtered agent-review diff: `{REVIEW_DIFF_NAME}` (correctness, API-reality, and tests)"
+    )
+    lines.append(
+        f"- Operator-only exclusion audit manifest: `{FILTER_MANIFEST_NAME}` "
+        "(not assigned to review agents)"
+    )
     lines.append("- The repository is checked out at the PR head commit in this directory.")
     lines.append("")
 
     context_path = workdir / SHARED_CONTEXT_NAME
     context_path.write_text("\n".join(lines), encoding="utf-8")
-    (workdir / DIFF_NAME).write_text(diff_text, encoding="utf-8")
     return context_path

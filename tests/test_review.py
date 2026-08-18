@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from review_bot.diff_filter import DiffFilterError
 from review_bot.github import Credentials, GitHubAppClient, PRInfo
 from review_bot.review import _load_prompt, build_review_body, run_review
 from review_bot.schema import load_schema
@@ -32,6 +33,23 @@ def test_load_prompt_includes_shared_rules():
 
 def test_load_prompt_names_every_required_top_level_output_field():
     text = _load_prompt("correctness.md")
+    for field in load_schema()["required"]:
+        assert f"`{field}`" in text
+
+
+@pytest.mark.parametrize(
+    ("name", "required", "forbidden"),
+    [
+        ("tests.md", "concrete regression", "Coverage percentages"),
+        ("safety.md", "source", "hardening advice"),
+    ],
+)
+def test_phase_2_prompts_state_focused_evidence_boundaries(
+    name: str, required: str, forbidden: str
+):
+    text = _load_prompt(name)
+    assert required in text
+    assert forbidden in text
     for field in load_schema()["required"]:
         assert f"`{field}`" in text
 
@@ -123,11 +141,19 @@ def _make_runner_factory(final: dict, api_reality: dict | None = None):
         results: dict[str, object] = {
             "correctness": final,
             "api-reality": api_reality if api_reality is not None else final,
+            "tests": final,
+            "safety": final,
             "coordinator": final,
         }
         return FakeAgentRunner(results)
 
     return factory
+
+
+def _fake_diff_artifact_writer(workdir: Path, diff_text: str):
+    (workdir / "provider-diff.diff").write_text(diff_text)
+    (workdir / "review-diff.diff").write_text(diff_text)
+    (workdir / "diff-filter.json").write_text('{"version": 1, "exclusions": []}\n')
 
 
 def test_build_review_body_with_unattached_finding():
@@ -166,6 +192,7 @@ def test_run_review_happy_path(tmp_path: Path, sample_diff):
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
             root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
         ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
     )
     assert exit_code == 0
     assert len(posted) == 1
@@ -184,6 +211,7 @@ def test_run_review_bot_skip(tmp_path: Path):
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
             root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
         ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
     )
     assert exit_code == 0
     assert posted == []
@@ -206,6 +234,7 @@ def test_run_review_dry_run_does_not_post(tmp_path: Path, sample_diff):
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
             root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
         ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
     )
     assert exit_code == 0
     assert posted == []
@@ -219,7 +248,13 @@ def test_run_review_agent_failure_surfaces_in_summary(tmp_path: Path, sample_dif
 
     def runner_factory(**kwargs):
         return FakeAgentRunner(
-            {"correctness": final, "api-reality": Exception("boom"), "coordinator": final}
+            {
+                "correctness": final,
+                "api-reality": Exception("boom"),
+                "tests": final,
+                "safety": final,
+                "coordinator": final,
+            }
         )
 
     exit_code = run_review(
@@ -229,6 +264,7 @@ def test_run_review_agent_failure_surfaces_in_summary(tmp_path: Path, sample_dif
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
             root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
         ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
     )
     assert exit_code == 0
     assert "boom" in posted[0]["body"]
@@ -259,6 +295,164 @@ def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff):
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
             root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
         ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
     )
     assert exit_code == 5
     assert posted == []
+
+
+def test_run_review_uses_fixed_four_agent_inputs_even_when_filtered_diff_empty(
+    tmp_path: Path, sample_diff
+):
+    pr = _make_pr()
+    posted: list[dict] = []
+    final = make_review(findings=[], overall_correctness="patch is correct")
+    runner = FakeAgentRunner(
+        {
+            "correctness": final,
+            "api-reality": final,
+            "tests": final,
+            "safety": final,
+            "coordinator": final,
+        }
+    )
+
+    def empty_writer(workdir: Path, diff_text: str):
+        _fake_diff_artifact_writer(workdir, diff_text)
+        (workdir / "review-diff.diff").write_text("")
+
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--dry-run",
+            "--keep-workspace",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(pr, sample_diff, posted),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
+            root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
+        ),
+        diff_artifact_writer=empty_writer,
+    )
+
+    assert exit_code == 0
+    assert sorted(runner.calls[:4]) == ["api-reality", "correctness", "safety", "tests"]
+    assert runner.calls[-1] == "coordinator"
+    inputs_by_name = {spec.name: spec.input_files for spec in runner.specs}
+    assert inputs_by_name["correctness"] == ("shared-context.md", "review-diff.diff")
+    assert inputs_by_name["api-reality"] == ("shared-context.md", "review-diff.diff")
+    assert inputs_by_name["tests"] == ("shared-context.md", "review-diff.diff")
+    assert inputs_by_name["safety"] == ("shared-context.md", "provider-diff.diff")
+
+
+def test_run_review_all_agents_failed_stops_before_coordinator(tmp_path: Path, sample_diff):
+    pr = _make_pr()
+    posted: list[dict] = []
+    runner = FakeAgentRunner(
+        {
+            "correctness": Exception("failed"),
+            "api-reality": Exception("failed"),
+            "tests": Exception("failed"),
+            "safety": Exception("failed"),
+            "coordinator": make_review(findings=[]),
+        }
+    )
+    exit_code = run_review(
+        ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+        client_factory=_make_client_factory(pr, sample_diff, posted),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
+            root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
+        ),
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+    assert exit_code == 3
+    assert sorted(runner.calls) == ["api-reality", "correctness", "safety", "tests"]
+    assert "coordinator" not in runner.calls
+    assert posted == []
+
+
+def test_run_review_safety_finding_on_filtered_file_uses_provider_diff(tmp_path: Path):
+    diff = (
+        "diff --git a/uv.lock b/uv.lock\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/uv.lock\n"
+        "+++ b/uv.lock\n"
+        "@@ -0,0 +1 @@\n"
+        '+token = "live-looking-value"\n'
+    )
+    pr = _make_pr(changed_files=["uv.lock"])
+    posted: list[dict] = []
+    finding = make_finding(path="uv.lock", start=1, end=1, priority=2)
+    final = make_review(findings=[finding])
+
+    def filtered_writer(workdir: Path, diff_text: str):
+        _fake_diff_artifact_writer(workdir, diff_text)
+        (workdir / "review-diff.diff").write_text("")
+
+    exit_code = run_review(
+        ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+        client_factory=_make_client_factory(pr, diff, posted),
+        runner_factory=_make_runner_factory(final),
+        workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
+            root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
+        ),
+        diff_artifact_writer=filtered_writer,
+    )
+    assert exit_code == 0
+    assert posted[0]["comments"][0]["path"] == "uv.lock"
+    assert posted[0]["comments"][0]["side"] == "RIGHT"
+
+
+def test_run_review_artifact_failure_stops_before_agents(tmp_path: Path, sample_diff):
+    pr = _make_pr()
+    posted: list[dict] = []
+    runner = FakeAgentRunner({})
+
+    def broken_writer(workdir: Path, diff_text: str):
+        raise DiffFilterError("unattributable section")
+
+    exit_code = run_review(
+        ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+        client_factory=_make_client_factory(pr, sample_diff, posted),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
+            root, owner, repo, number, bootstrap_timeout=bootstrap_timeout
+        ),
+        diff_artifact_writer=broken_writer,
+    )
+    assert exit_code == 2
+    assert runner.calls == []
+    assert posted == []
+
+
+@pytest.mark.parametrize(("keep", "removed"), [(False, True), (True, False)])
+def test_run_review_workspace_cleanup_and_artifact_retention(
+    tmp_path: Path, sample_diff, keep: bool, removed: bool
+):
+    pr = _make_pr()
+    posted: list[dict] = []
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    args = [
+        "https://github.com/owner/repo/pull/7",
+        "--dry-run",
+        "--workspace-root",
+        str(tmp_path),
+    ]
+    if keep:
+        args.append("--keep-workspace")
+
+    exit_code = run_review(
+        args,
+        client_factory=_make_client_factory(pr, sample_diff, posted),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    assert exit_code == 0
+    assert workspace.removed is removed
+    assert (workspace.workdir / "provider-diff.diff").read_text() == sample_diff
+    assert (workspace.workdir / "diff-filter.json").exists()

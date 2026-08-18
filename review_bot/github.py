@@ -145,7 +145,7 @@ class GitHubAppClient:
             {
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": API_VERSION,
-                "User-Agent": "review-bot-phase-1",
+                "User-Agent": "review-bot-phase-2",
             }
         )
 

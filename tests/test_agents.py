@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 from review_bot.agents.runner import (
     AgentResult,
+    AgentRunner,
+    AgentSpec,
     CodexAgentRunner,
     PiAgentRunner,
     run_agents_concurrently,
@@ -24,7 +27,10 @@ def test_run_agents_concurrently_preserves_order():
     )
     results = run_agents_concurrently(
         runner,
-        [("correctness", "p1"), ("api-reality", "p2")],
+        [
+            AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
+            AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+        ],
         Path("/tmp"),
     )
     assert [r.name for r in results] == ["correctness", "api-reality"]
@@ -40,7 +46,10 @@ def test_run_agents_concurrently_isolates_failures():
     )
     results = run_agents_concurrently(
         runner,
-        [("correctness", "p1"), ("api-reality", "p2")],
+        [
+            AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
+            AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+        ],
         Path("/tmp"),
     )
     assert results[0].ok
@@ -54,6 +63,27 @@ def test_run_agents_empty_list():
     assert run_agents_concurrently(runner, [], Path("/tmp")) == []
 
 
+def test_all_four_review_agents_reach_concurrent_execution():
+    barrier = threading.Barrier(4, timeout=2)
+
+    class BarrierRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            barrier.wait()
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    specs = [
+        AgentSpec(name, "prompt", ("shared-context.md", "review-diff.diff"))
+        for name in ("correctness", "api-reality", "tests", "safety")
+    ]
+    results = run_agents_concurrently(BarrierRunner(), specs, Path("/tmp"))
+    assert [result.name for result in results] == [
+        "correctness",
+        "api-reality",
+        "tests",
+        "safety",
+    ]
+
+
 def test_codex_runner_command_builds(tmp_path: Path):
     from review_bot.schema import load_schema
 
@@ -64,6 +94,33 @@ def test_codex_runner_command_builds(tmp_path: Path):
         assert json.loads(runner._schema_file.read_text(encoding="utf-8")) == schema
     finally:
         runner.close()
+
+
+def test_codex_runner_prompt_names_only_explicit_inputs(monkeypatch, tmp_path: Path):
+    from review_bot.schema import load_schema
+
+    captured_input: list[str] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        captured_input.append(kwargs["input"])
+        output_path = Path(cmd[cmd.index("-o") + 1])
+        output_path.write_text(json.dumps(make_review(findings=[])))
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    runner = CodexAgentRunner(command="codex", schema=load_schema())
+    try:
+        result = runner.run(
+            AgentSpec("safety", "prompt", ("shared-context.md", "provider-diff.diff")),
+            tmp_path,
+        )
+    finally:
+        runner.close()
+
+    assert result.ok
+    assert "`shared-context.md`" in captured_input[0]
+    assert "`provider-diff.diff`" in captured_input[0]
+    assert "review-diff.diff" not in captured_input[0]
 
 
 def test_pi_runner_command_builds():
@@ -102,10 +159,17 @@ def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
     runner = PiAgentRunner(command="pi", thinking="high")
     try:
-        result = runner.run("coordinator", "original prompt", tmp_path)
-        repair_prompt = Path(
-            commands[1][commands[1].index("--system-prompt") + 1]
-        ).read_text(encoding="utf-8")
+        result = runner.run(
+            AgentSpec(
+                "coordinator",
+                "original prompt",
+                ("shared-context.md", "raw-findings.json", "provider-diff.diff"),
+            ),
+            tmp_path,
+        )
+        repair_prompt = Path(commands[1][commands[1].index("--system-prompt") + 1]).read_text(
+            encoding="utf-8"
+        )
     finally:
         runner.close()
 
@@ -130,13 +194,17 @@ def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
     runner = PiAgentRunner(command="pi", persist_session=False)
     try:
-        result = runner.run("correctness", "prompt", tmp_path)
+        result = runner.run(
+            AgentSpec("correctness", "prompt", ("shared-context.md", "review-diff.diff")),
+            tmp_path,
+        )
     finally:
         runner.close()
 
     assert result.ok
     assert "--no-session" in commands[0]
     assert "--name" not in commands[0]
+    assert commands[0][-2:] == ["@shared-context.md", "@review-diff.diff"]
 
 
 def test_codex_runner_validates_output(tmp_path: Path):
@@ -146,16 +214,19 @@ def test_codex_runner_validates_output(tmp_path: Path):
     out_file.write_text(json.dumps(make_review(findings=[])))
 
     class FixedCodexRunner(CodexAgentRunner):
-        def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
             from review_bot.schema import validate_review_output
 
             data = json.loads(out_file.read_text(encoding="utf-8"))
             validate_review_output(data)
-            return AgentResult(name=name, ok=True, output=data)
+            return AgentResult(name=spec.name, ok=True, output=data)
 
     runner = FixedCodexRunner(schema=load_schema())
     try:
-        result = runner.run("correctness", "prompt", tmp_path)
+        result = runner.run(
+            AgentSpec("correctness", "prompt", ("shared-context.md", "review-diff.diff")),
+            tmp_path,
+        )
         assert result.ok
         assert result.output is not None
         assert result.output["status"] == "no_further_concerns"
@@ -170,7 +241,7 @@ def test_codex_runner_rejects_invalid_output(tmp_path: Path):
     out_file.write_text(json.dumps({"invalid": True}))
 
     class FixedCodexRunner(CodexAgentRunner):
-        def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
             from review_bot.schema import validate_review_output
 
             data = json.loads(out_file.read_text(encoding="utf-8"))
@@ -178,13 +249,18 @@ def test_codex_runner_rejects_invalid_output(tmp_path: Path):
                 validate_review_output(data)
             except SchemaError as e:
                 return AgentResult(
-                    name=name, ok=False, error=f"agent output failed schema validation: {e}"
+                    name=spec.name,
+                    ok=False,
+                    error=f"agent output failed schema validation: {e}",
                 )
-            return AgentResult(name=name, ok=True, output=data)
+            return AgentResult(name=spec.name, ok=True, output=data)
 
     runner = FixedCodexRunner(schema=load_schema())
     try:
-        result = runner.run("correctness", "prompt", tmp_path)
+        result = runner.run(
+            AgentSpec("correctness", "prompt", ("shared-context.md", "review-diff.diff")),
+            tmp_path,
+        )
         assert not result.ok
         assert result.error is not None
         assert "schema validation" in result.error

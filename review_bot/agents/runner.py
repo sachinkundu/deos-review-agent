@@ -82,10 +82,19 @@ class AgentResult:
         return f"failed: {self.error}"
 
 
+@dataclass(frozen=True)
+class AgentSpec:
+    """One agent role with its prompt and explicitly assigned workspace inputs."""
+
+    name: str
+    prompt: str
+    input_files: tuple[str, ...]
+
+
 class AgentRunner:
     """Interface for running one agent in a workspace directory."""
 
-    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
+    def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         raise NotImplementedError
 
     def close(self) -> None:
@@ -93,13 +102,12 @@ class AgentRunner:
 
 
 def run_agents_concurrently(
-    runner: AgentRunner, specs: list[tuple[str, str]], workdir: Path
+    runner: AgentRunner, specs: list[AgentSpec], workdir: Path
 ) -> list[AgentResult]:
-    """Run every (name, prompt) spec concurrently; results keep spec order."""
+    """Run every explicit agent spec concurrently; results keep roster order."""
 
-    def _one(spec: tuple[str, str]) -> AgentResult:
-        name, prompt = spec
-        return runner.run(name, prompt, workdir)
+    def _one(spec: AgentSpec) -> AgentResult:
+        return runner.run(spec, workdir)
 
     if not specs:
         return []
@@ -138,8 +146,8 @@ class CodexAgentRunner(AgentRunner):
     def close(self) -> None:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
-        out_file = self._tmpdir / f"{name}.json"
+    def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+        out_file = self._tmpdir / f"{spec.name}.json"
         out_file.unlink(missing_ok=True)
         cmd = [
             self.command,
@@ -158,6 +166,12 @@ class CodexAgentRunner(AgentRunner):
         if self.model:
             cmd += ["--model", self.model]
 
+        assigned_inputs = "\n".join(f"- `{name}`" for name in spec.input_files)
+        prompt = (
+            f"{spec.prompt}\n\n## Assigned input files\n\n{assigned_inputs}\n\n"
+            "Read every assigned input file before reviewing.\n"
+        )
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -168,25 +182,35 @@ class CodexAgentRunner(AgentRunner):
                 cwd=str(workdir),
             )
         except subprocess.TimeoutExpired:
-            return AgentResult(name=name, ok=False, error=f"agent timed out after {self.timeout}s")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent timed out after {self.timeout}s"
+            )
         except FileNotFoundError as e:
             return AgentResult(
-                name=name, ok=False, error=f"agent command not found: {self.command!r} ({e})"
+                name=spec.name,
+                ok=False,
+                error=f"agent command not found: {self.command!r} ({e})",
             )
 
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip()[-800:]
-            return AgentResult(name=name, ok=False, error=f"agent exited {proc.returncode}: {tail}")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent exited {proc.returncode}: {tail}"
+            )
         if not out_file.exists():
             tail = (proc.stderr or "").strip()[-400:]
-            return AgentResult(name=name, ok=False, error=f"agent produced no output file ({tail})")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent produced no output file ({tail})"
+            )
 
         try:
             data = json.loads(out_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            return AgentResult(name=name, ok=False, error=f"agent output is not valid JSON: {e}")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent output is not valid JSON: {e}"
+            )
 
-        return _validate(name, data)
+        return _validate(spec.name, data)
 
 
 class PiAgentRunner(AgentRunner):
@@ -221,9 +245,9 @@ class PiAgentRunner(AgentRunner):
     def close(self) -> None:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _run_once(self, name: str, prompt_file: Path, workdir: Path) -> AgentResult:
+    def _run_once(self, spec: AgentSpec, prompt_file: Path, workdir: Path) -> AgentResult:
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
-        per_agent_key = f"REVIEW_{name.upper().replace('-', '_')}_THINKING"
+        per_agent_key = f"REVIEW_{spec.name.upper().replace('-', '_')}_THINKING"
         thinking = os.environ.get(per_agent_key) or self.thinking
 
         cmd = [
@@ -233,19 +257,15 @@ class PiAgentRunner(AgentRunner):
             "text",
         ]
         if self.persist_session:
-            cmd += ["--name", f"review-bot-{name}"]
+            cmd += ["--name", f"review-bot-{spec.name}"]
         else:
             cmd.append("--no-session")
         if thinking:
             cmd += ["--thinking", thinking]
         if self.model:
             cmd += ["--model", self.model]
-        cmd += [
-            "--system-prompt",
-            str(prompt_file),
-            "@shared-context.md",
-            "@review-diff.diff",
-        ]
+        cmd += ["--system-prompt", str(prompt_file)]
+        cmd += [f"@{input_file}" for input_file in spec.input_files]
 
         try:
             proc = subprocess.run(
@@ -256,37 +276,45 @@ class PiAgentRunner(AgentRunner):
                 cwd=str(workdir),
             )
         except subprocess.TimeoutExpired:
-            return AgentResult(name=name, ok=False, error=f"agent timed out after {self.timeout}s")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent timed out after {self.timeout}s"
+            )
         except FileNotFoundError as e:
             return AgentResult(
-                name=name, ok=False, error=f"agent command not found: {self.command!r} ({e})"
+                name=spec.name,
+                ok=False,
+                error=f"agent command not found: {self.command!r} ({e})",
             )
 
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip()[-800:]
-            return AgentResult(name=name, ok=False, error=f"agent exited {proc.returncode}: {tail}")
+            return AgentResult(
+                name=spec.name, ok=False, error=f"agent exited {proc.returncode}: {tail}"
+            )
 
         try:
             data = _extract_json(proc.stdout)
         except (json.JSONDecodeError, ValueError) as e:
             tail = proc.stdout.strip()[-800:]
             return AgentResult(
-                name=name, ok=False, error=f"agent output is not valid JSON: {e} ({tail})"
+                name=spec.name,
+                ok=False,
+                error=f"agent output is not valid JSON: {e} ({tail})",
             )
 
-        return _validate(name, data)
+        return _validate(spec.name, data)
 
-    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
-        prompt_file = self._tmpdir / f"{name}-prompt.md"
-        prompt_file.write_text(prompt, encoding="utf-8")
+    def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+        prompt_file = self._tmpdir / f"{spec.name}-prompt.md"
+        prompt_file.write_text(spec.prompt, encoding="utf-8")
 
-        result = self._run_once(name, prompt_file, workdir)
+        result = self._run_once(spec, prompt_file, workdir)
         invalid_output = result.extra.get("invalid_output")
         if result.ok or invalid_output is None:
             return result
 
         repair_prompt = (
-            f"{prompt}\n\n"
+            f"{spec.prompt}\n\n"
             "## Schema repair\n\n"
             "Your previous JSON response contained the completed review but failed schema "
             "validation. Correct only its structure and constrained values; preserve the "
@@ -294,9 +322,10 @@ class PiAgentRunner(AgentRunner):
             f"Validation errors:\n{result.error}\n\n"
             f"Previous JSON:\n```json\n{json.dumps(invalid_output, ensure_ascii=False)}\n```\n"
         )
-        repair_prompt_file = self._tmpdir / f"{name}-repair-prompt.md"
+        repair_prompt_file = self._tmpdir / f"{spec.name}-repair-prompt.md"
         repair_prompt_file.write_text(repair_prompt, encoding="utf-8")
-        repaired = self._run_once(name, repair_prompt_file, workdir)
+        repair_spec = AgentSpec(spec.name, repair_prompt, spec.input_files)
+        repaired = self._run_once(repair_spec, repair_prompt_file, workdir)
         if not repaired.ok:
             repaired.error = f"{result.error}; schema repair failed: {repaired.error}"
         return repaired
