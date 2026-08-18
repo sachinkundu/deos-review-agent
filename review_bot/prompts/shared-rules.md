@@ -2,14 +2,21 @@
 
 ### Inputs
 
-- `shared-context.md` — PR title, body, head/base SHA, sender, changed files,
-  linked issue references, validation results.
-- `review-diff.diff` — the full unified diff of the PR.
+- Your invocation explicitly assigns every input file for this role. Read every
+  assigned file before reviewing.
+- `shared-context.md` contains PR title, body, head/base SHA, sender, the complete
+  provider-reported changed-file list, linked issue references, validation results,
+  and descriptions of the review artifacts.
+- When assigned, `review-diff.diff` is a deterministic filtered view containing
+  complete retained file patches. It can be empty.
+- When assigned, `provider-diff.diff` is the complete provider-originated unified
+  diff and is the source of truth for comment locations.
+- `diff-filter.json` is an operator audit artifact and is not an agent input.
 
-Read both files first. Read other files in the repository only when you need
-context to judge correctness (for example, a helper the diff calls, dependency
-manifests for version checking, or architecture documents for lifecycle
-context).
+Read other files in the repository only when you need context to judge your
+assigned review scope (for example, a helper the diff calls, dependency manifests
+for version checking, tests covering changed behavior, or architecture documents
+for lifecycle context).
 
 ### Architecture context
 
@@ -26,8 +33,9 @@ that do not translate into a concrete bug.
 - `body`: evidence (what the code does), the problem, and a **concrete
   failure scenario** (specific input/state that produces the wrong behavior).
 - `code_location.absolute_file_path`: the repository-relative path exactly as
-  it appears in the diff. `line_range`: line numbers in the **new** (right-side)
-  file, pointing at lines that are present in the diff. `start` <= `end`.
+  it appears in the assigned diff. `line_range`: line numbers in the **new**
+  (right-side) file, pointing at lines that are present in the complete provider
+  diff. `start` <= `end`.
 - `suggested_fix.description`: how to fix it; `replacement`: concrete code when
   you know it, otherwise an empty string.
 - `priority`: 0 = suggestion only, 1 = warning (potential issue),

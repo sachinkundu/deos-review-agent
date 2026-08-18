@@ -13,7 +13,7 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from review_bot.agents.runner import AgentResult, AgentRunner
+from review_bot.agents.runner import AgentResult, AgentRunner, AgentSpec
 
 
 def make_finding(
@@ -171,18 +171,20 @@ class FakeAgentRunner(AgentRunner):
     def __init__(self, results: dict[str, object]):
         self.results = results
         self.calls: list[str] = []
+        self.specs: list[AgentSpec] = []
         self.closed = False
 
-    def run(self, name: str, prompt: str, workdir: Path) -> AgentResult:
-        self.calls.append(name)
-        result = self.results.get(name)
+    def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+        self.calls.append(spec.name)
+        self.specs.append(spec)
+        result = self.results.get(spec.name)
         if result is None:
-            return AgentResult(name=name, ok=False, error="no canned result")
+            return AgentResult(name=spec.name, ok=False, error="no canned result")
         if isinstance(result, Exception):
-            return AgentResult(name=name, ok=False, error=str(result))
+            return AgentResult(name=spec.name, ok=False, error=str(result))
         if isinstance(result, AgentResult):
             return result
-        return AgentResult(name=name, ok=True, output=cast(dict[str, Any], result))
+        return AgentResult(name=spec.name, ok=True, output=cast(dict[str, Any], result))
 
     def close(self) -> None:
         self.closed = True

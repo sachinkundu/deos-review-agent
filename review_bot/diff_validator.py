@@ -13,10 +13,10 @@ are moved to the review summary body instead.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-_GIT_DIFF_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 _RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
 _RENAME_TO_RE = re.compile(r"^rename to (.+)$")
 _MODE_RE = re.compile(
@@ -54,6 +54,22 @@ def _clean_quoted_path(path: str) -> str:
     return path
 
 
+def _parse_git_diff_header(header: str) -> tuple[str, str] | None:
+    """Return old/new paths from an unquoted or C-quoted ``diff --git`` header."""
+    if not header.startswith("diff --git "):
+        return None
+    try:
+        fields = shlex.split(header)
+    except ValueError:
+        return None
+    if len(fields) != 4 or fields[:2] != ["diff", "--git"]:
+        return None
+    old, new = (_clean_quoted_path(value) for value in fields[2:])
+    if not old.startswith("a/") or not new.startswith("b/"):
+        return None
+    return old[2:], new[2:]
+
+
 def parse_unified_diff(diff_text: str) -> dict[str, FileDiff]:
     """Parse a raw unified diff (as GitHub returns for a PR) into per-file data.
 
@@ -65,9 +81,8 @@ def parse_unified_diff(diff_text: str) -> dict[str, FileDiff]:
     new_line = 0
 
     for raw in diff_text.splitlines():
-        if m := _GIT_DIFF_RE.match(raw):
-            old = _clean_quoted_path(m.group(1))
-            new = _clean_quoted_path(m.group(2))
+        if paths := _parse_git_diff_header(raw):
+            old, new = paths
             if new == "/dev/null":
                 continue  # deletion handled via the deleted-file marker below
             current = FileDiff(path=new, old_path=old if old != new else None)

@@ -1,7 +1,7 @@
 [project]
 name = "review-bot"
 version = "0.1.0"
-description = "Correctness-focused PR review bot (Phase 1): local CLI that reviews a PR and posts a GitHub App review."
+description = "Focused four-agent PR review bot (Phase 2): local CLI that reviews a PR and posts a GitHub App review."
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",

@@ -1,4 +1,4 @@
-"""review_bot CLI entrypoint: wires the Phase 1 review pipeline.
+"""review_bot CLI entrypoint: wires the Phase 2 review pipeline.
 
 Usage:
     review-bot <PR_URL> [--dry-run] [--keep-workspace] [--no-agent-session] [options]
@@ -6,10 +6,10 @@ Usage:
 
 Flow: load credentials -> mint installation token (one per run) -> fetch PR
 metadata + diff -> skip bot-authored PRs -> clone/checkout/bootstrap the
-workspace -> write shared context -> run the correctness and API-reality
-agents concurrently -> coordinator -> schema validation -> diff-line
-validation -> head-SHA freshness re-check -> post the review (or dry-run) ->
-session cleanup.
+workspace -> build full/filtered diff artifacts and shared context -> run the
+correctness, API-reality, tests, and safety agents concurrently -> coordinator
+-> schema validation -> full-diff line validation -> head-SHA freshness
+re-check -> post the review (or dry-run) -> session cleanup.
 """
 
 from __future__ import annotations
@@ -25,11 +25,18 @@ from . import __version__
 from .agents.runner import (
     DEFAULT_AGENT_TIMEOUT,
     AgentRunner,
+    AgentSpec,
     CodexAgentRunner,
     PiAgentRunner,
     run_agents_concurrently,
 )
 from .coordinator import CoordinatorError, run_coordinator, write_raw_findings
+from .diff_filter import (
+    PROVIDER_DIFF_NAME,
+    REVIEW_DIFF_NAME,
+    DiffFilterError,
+    write_diff_artifacts,
+)
 from .diff_validator import parse_unified_diff, validate_findings_locations
 from .github import (
     Credentials,
@@ -41,7 +48,7 @@ from .github import (
     parse_pr_url,
 )
 from .schema import SchemaError, validate_review_output
-from .shared_context import write_shared_context
+from .shared_context import SHARED_CONTEXT_NAME, write_shared_context
 from .workspace import DEFAULT_BOOTSTRAP_TIMEOUT, PRWorkspace, WorkspaceError
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -115,7 +122,7 @@ def build_review_body(
     verdict = review["overall_correctness"]
     confidence = review["overall_confidence_score"]
     if finding_count == 0:
-        lines.append("**Result:** No correctness or API-reality issues found. ✔")
+        lines.append("**Result:** No correctness, API-reality, tests, or safety issues found. ✔")
     else:
         critical = sum(1 for f in review["findings"] if f.get("priority") == 2)
         parts = [f"{finding_count} finding(s)"]
@@ -206,8 +213,9 @@ def run_review(
     client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
     runner_factory: Callable[..., AgentRunner] = build_agent_runner,
     workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
+    diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
 ) -> int:
-    parser = argparse.ArgumentParser(prog="review-bot", description="Review a GitHub PR (Phase 1).")
+    parser = argparse.ArgumentParser(prog="review-bot", description="Review a GitHub PR (Phase 2).")
     parser.add_argument("--version", action="version", version=f"review-bot {__version__}")
     parser.add_argument("pr_url", help="GitHub pull request URL")
     parser.add_argument(
@@ -234,7 +242,7 @@ def run_review(
         default=None,
         help="thinking level for pi driver (off/minimal/low/medium/high/xhigh/max)",
     )
-    parser.add_argument("--agent-command", default=None, help="agent CLI command (default: codex)")
+    parser.add_argument("--agent-command", default=None, help="agent CLI command (default: pi)")
     args = parser.parse_args(argv)
 
     try:
@@ -302,7 +310,12 @@ def run_review(
             print(f"error: bootstrap failed: {bootstrap.summary}", file=sys.stderr)
             return 2
 
-        write_shared_context(workspace.workdir, pr, diff_text, bootstrap)
+        try:
+            diff_artifact_writer(workspace.workdir, diff_text)
+        except DiffFilterError as e:
+            print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
+            return 2
+        write_shared_context(workspace.workdir, pr, bootstrap)
 
         runner = runner_factory(
             command=opts.agent_command,
@@ -313,8 +326,26 @@ def run_review(
         )
         try:
             specs = [
-                ("correctness", _load_prompt("correctness.md")),
-                ("api-reality", _load_prompt("api-reality.md")),
+                AgentSpec(
+                    "correctness",
+                    _load_prompt("correctness.md"),
+                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
+                ),
+                AgentSpec(
+                    "api-reality",
+                    _load_prompt("api-reality.md"),
+                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
+                ),
+                AgentSpec(
+                    "tests",
+                    _load_prompt("tests.md"),
+                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
+                ),
+                AgentSpec(
+                    "safety",
+                    _load_prompt("safety.md"),
+                    (SHARED_CONTEXT_NAME, PROVIDER_DIFF_NAME),
+                ),
             ]
             agent_results = run_agents_concurrently(runner, specs, workspace.workdir)
 

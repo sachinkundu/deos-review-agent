@@ -32,7 +32,7 @@ def _make_pr(**overrides) -> PRInfo:
 def test_write_shared_context(tmp_path: Path):
     pr = _make_pr()
     bootstrap = BootstrapResult(ran=True, ok=True)
-    context_path = write_shared_context(tmp_path, pr, "diff text", bootstrap)
+    context_path = write_shared_context(tmp_path, pr, bootstrap)
     assert context_path == tmp_path / SHARED_CONTEXT_NAME
     text = context_path.read_text(encoding="utf-8")
     assert "Fix pagination" in text
@@ -40,12 +40,15 @@ def test_write_shared_context(tmp_path: Path):
     assert "abc123" in text
     assert "src/paginate.py" in text
     assert "bootstrap succeeded" in text
-    assert (tmp_path / "review-diff.diff").read_text(encoding="utf-8") == "diff text"
+    assert "provider-diff.diff" in text
+    assert "review-diff.diff" in text
+    assert "diff-filter.json" in text
+    assert not (tmp_path / "review-diff.diff").exists()
 
 
 def test_linked_issue_references_included(tmp_path: Path):
     pr = _make_pr(body="Fixes #123, resolves SAC-87")
-    write_shared_context(tmp_path, pr, "diff")
+    write_shared_context(tmp_path, pr)
     text = (tmp_path / SHARED_CONTEXT_NAME).read_text(encoding="utf-8")
     assert "#123" in text
     assert "SAC-87" in text
@@ -54,7 +57,7 @@ def test_linked_issue_references_included(tmp_path: Path):
 def test_bootstrap_failure_recorded(tmp_path: Path):
     pr = _make_pr()
     bootstrap = BootstrapResult(ran=True, ok=False, exit_code=2, output_tail="missing dep")
-    write_shared_context(tmp_path, pr, "diff", bootstrap)
+    write_shared_context(tmp_path, pr, bootstrap)
     text = (tmp_path / SHARED_CONTEXT_NAME).read_text(encoding="utf-8")
     assert "bootstrap failed" in text
     assert "missing dep" in text
@@ -62,6 +65,6 @@ def test_bootstrap_failure_recorded(tmp_path: Path):
 
 def test_no_bootstrap_recorded(tmp_path: Path):
     pr = _make_pr()
-    write_shared_context(tmp_path, pr, "diff")
+    write_shared_context(tmp_path, pr)
     text = (tmp_path / SHARED_CONTEXT_NAME).read_text(encoding="utf-8")
     assert "no validation commands run" in text

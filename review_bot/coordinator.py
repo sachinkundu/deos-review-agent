@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .agents.runner import AgentResult, AgentRunner
+from .agents.runner import AgentResult, AgentRunner, AgentSpec
+from .diff_filter import PROVIDER_DIFF_NAME
+from .shared_context import SHARED_CONTEXT_NAME
 
 RAW_FINDINGS_NAME = "raw-findings.json"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -57,7 +59,12 @@ def run_coordinator(runner: AgentRunner, workdir: Path) -> dict:
     Raises CoordinatorError when the coordinator fails or its output does not
     match the review schema (the run must stop without posting).
     """
-    result = runner.run("coordinator", load_coordinator_prompt(), workdir)
+    spec = AgentSpec(
+        name="coordinator",
+        prompt=load_coordinator_prompt(),
+        input_files=(SHARED_CONTEXT_NAME, RAW_FINDINGS_NAME, PROVIDER_DIFF_NAME),
+    )
+    result = runner.run(spec, workdir)
     if not result.ok or result.output is None:
         raise CoordinatorError(f"coordinator failed: {result.error}")
     # The `status` field must survive the coordinator rewrite (it is used by

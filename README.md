@@ -3,23 +3,38 @@
 A correctness-focused PR review bot that posts line comments as a GitHub App.
 
 This repository contains the review bot itself. It is developed independently
-from the projects it reviews (for example, `deos`). The first phase is a local
-CLI; later phases may add a webhook server, additional review agents, and
-optional orchestration integration.
+from the projects it reviews (for example, `deos`). The current implementation
+is a local CLI; later phases may add risk tiers, re-reviews, a webhook server,
+and optional orchestration integration.
 
 ## Current phase
 
-**Phase 1 — Local CLI with correctness and API-reality agents**
+**Phase 2 — Four-agent local CLI with deterministic diff filtering**
 
 - Fetch a PR diff via GitHub App installation token.
-- Clone the repository and check out the PR branch.
-- Run a correctness sub-agent and an API-reality sub-agent concurrently.
+- Clone the repository and check out the exact PR head SHA.
+- Preserve the complete provider diff while deterministically filtering
+  generated, vendored, and lockfile sections from lower-noise review input.
+- Run correctness, API-reality, tests, and safety agents concurrently on every
+  review. Safety always receives the complete provider diff.
 - Run a coordinator that deduplicates, filters, and rewrites findings.
-- Validate that every finding maps to a line in the PR diff.
+- Validate every finding against the complete provider diff and current head SHA.
 - Post the review as the GitHub App.
 
-See `openspec/changes/review-bot-phase-1/proposal.md` for the approved-scope
-proposal and `docs/review-bot-proposal.md` for background and learnings.
+See `openspec/changes/review-bot-phase-2/` for the approved proposal,
+specifications, design, and implementation tasks. Risk tiers and conditional
+agent selection remain Phase 3 scope.
+
+With `--keep-workspace`, operators can inspect:
+
+- `provider-diff.diff` — the unchanged provider response used by safety,
+  coordination, and final line validation;
+- `review-diff.diff` — complete retained file sections used by correctness,
+  API-reality, and tests;
+- `diff-filter.json` — deterministic excluded path, category, and matched-rule
+  records; and
+- `raw-findings.json` — roster-ordered successes, empty results, and failures
+  passed to the coordinator.
 
 ## Development notes
 
