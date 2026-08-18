@@ -22,7 +22,7 @@ Risk classification and trivial/lite/full agent-selection tiers are explicitly o
 
 ### Modified Capabilities
 
-None. The Phase 1 agent runner, shared context, coordinator, schema, and concurrent pipeline are extended by implementation but retain their existing external contracts.
+- `review-bot/agent-pipeline`: Expand the required concurrent agent roster from correctness and API-reality agents to correctness, API-reality, tests, and safety agents while retaining partial-failure handling and combined coordinator input.
 
 ## Impact
 
