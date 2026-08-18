@@ -5,15 +5,21 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 
+import pytest
+
+from review_bot.agents.registry import AgentSkill, package_digest
 from review_bot.agents.runner import (
     AgentResult,
     AgentRunner,
     AgentSpec,
     CodexAgentRunner,
+    HarnessError,
     PiAgentRunner,
     run_agents_concurrently,
+    verify_harness_command,
 )
 from tests.conftest import FakeAgentRunner, make_review
 
@@ -28,10 +34,15 @@ def test_run_agents_concurrently_preserves_order():
     results = run_agents_concurrently(
         runner,
         [
-            AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
-            AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+            (
+                AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
+                Path("/tmp/correctness"),
+            ),
+            (
+                AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+                Path("/tmp/api-reality"),
+            ),
         ],
-        Path("/tmp"),
     )
     assert [r.name for r in results] == ["correctness", "api-reality"]
     assert all(r.ok for r in results)
@@ -47,10 +58,15 @@ def test_run_agents_concurrently_isolates_failures():
     results = run_agents_concurrently(
         runner,
         [
-            AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
-            AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+            (
+                AgentSpec("correctness", "p1", ("shared-context.md", "review-diff.diff")),
+                Path("/tmp/correctness"),
+            ),
+            (
+                AgentSpec("api-reality", "p2", ("shared-context.md", "review-diff.diff")),
+                Path("/tmp/api-reality"),
+            ),
         ],
-        Path("/tmp"),
     )
     assert results[0].ok
     assert not results[1].ok
@@ -60,7 +76,7 @@ def test_run_agents_concurrently_isolates_failures():
 
 def test_run_agents_empty_list():
     runner = FakeAgentRunner({})
-    assert run_agents_concurrently(runner, [], Path("/tmp")) == []
+    assert run_agents_concurrently(runner, []) == []
 
 
 def test_all_four_review_agents_reach_concurrent_execution():
@@ -75,13 +91,62 @@ def test_all_four_review_agents_reach_concurrent_execution():
         AgentSpec(name, "prompt", ("shared-context.md", "review-diff.diff"))
         for name in ("correctness", "api-reality", "tests", "safety")
     ]
-    results = run_agents_concurrently(BarrierRunner(), specs, Path("/tmp"))
+    results = run_agents_concurrently(
+        BarrierRunner(), [(spec, Path("/tmp") / spec.name) for spec in specs]
+    )
     assert [result.name for result in results] == [
         "correctness",
         "api-reality",
         "tests",
         "safety",
     ]
+
+
+def test_concurrency_is_bounded_and_result_order_is_stable():
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class BoundedRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    specs = [AgentSpec(f"agent-{index}", "prompt", ()) for index in range(6)]
+    results = run_agents_concurrently(
+        BoundedRunner(),
+        [(spec, Path("/tmp") / spec.name) for spec in specs],
+        max_concurrency=2,
+    )
+    assert peak == 2
+    assert [result.name for result in results] == [spec.name for spec in specs]
+
+
+def test_package_mutation_blocks_launch_before_any_runner_starts(tmp_path: Path):
+    package = tmp_path / "agent"
+    package.mkdir()
+    prompt = package / "prompt.md"
+    prompt.write_text("original")
+    spec = AgentSpec(
+        "reviewer",
+        "prompt",
+        (),
+        "review-bot/v1",
+        package_digest(package),
+        (),
+        package,
+    )
+    prompt.write_text("mutated")
+    runner = FakeAgentRunner({"reviewer": make_review(findings=[])})
+    with pytest.raises(HarnessError, match="changed before launch"):
+        run_agents_concurrently(runner, [(spec, tmp_path)])
+    assert runner.calls == []
 
 
 def test_codex_runner_command_builds(tmp_path: Path):
@@ -121,6 +186,60 @@ def test_codex_runner_prompt_names_only_explicit_inputs(monkeypatch, tmp_path: P
     assert "`shared-context.md`" in captured_input[0]
     assert "`provider-diff.diff`" in captured_input[0]
     assert "review-diff.diff" not in captured_input[0]
+
+
+def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
+    monkeypatch, tmp_path: Path
+):
+    from review_bot.schema import load_schema
+
+    real_codex_home = tmp_path / "real-codex"
+    real_codex_home.mkdir()
+    (real_codex_home / "auth.json").write_text('{"token":"not-printed"}')
+    monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-forward")
+    package = tmp_path / "package"
+    skill_dir = package / "skills" / "owned"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: owned\ndescription: Use for owned review work.\n---\nUse it.\n"
+    )
+    skill = AgentSkill("owned", skill_dir, "sha256:owned")
+    capsule = tmp_path / "capsule"
+    capsule.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        captured["auth_mode"] = (
+            Path(kwargs["env"]["CODEX_HOME"]) / "auth.json"
+        ).stat().st_mode & 0o777
+        output_path = Path(cmd[cmd.index("-o") + 1])
+        output_path.write_text(json.dumps(make_review(findings=[])))
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    runner = CodexAgentRunner(command="codex", schema=load_schema())
+    try:
+        result = runner.run(AgentSpec("reviewer", "prompt", (), skills=(skill,)), capsule)
+    finally:
+        runner.close()
+
+    assert result.ok
+    cmd = captured["cmd"]
+    env = captured["env"]
+    assert isinstance(cmd, list)
+    assert isinstance(env, dict)
+    assert "--ignore-user-config" in cmd
+    assert "--ignore-rules" in cmd
+    assert "--skip-git-repo-check" in cmd
+    assert env["HOME"] != str(Path.home())
+    assert env["CODEX_HOME"] != str(real_codex_home)
+    assert "GITHUB_TOKEN" not in env
+    assert captured["auth_mode"] == 0o600
+    assert (Path(env["CODEX_HOME"]) / "auth.json").exists() is False  # cleaned on close
+    assert (capsule / ".agents" / "skills" / "owned" / "SKILL.md").is_file()
 
 
 def test_pi_runner_command_builds():
@@ -204,7 +323,70 @@ def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
     assert result.ok
     assert "--no-session" in commands[0]
     assert "--name" not in commands[0]
+    assert "--no-skills" in commands[0]
+    assert "--no-extensions" in commands[0]
+    assert "--no-context-files" in commands[0]
     assert commands[0][-2:] == ["@shared-context.md", "@review-diff.diff"]
+
+
+def test_pi_runner_passes_only_explicit_owned_skills(monkeypatch, tmp_path: Path):
+    commands: list[list[str]] = []
+    owned = tmp_path / "owned"
+    owned.mkdir()
+    (owned / "SKILL.md").write_text(
+        "---\nname: owned\ndescription: Use for owned work.\n---\nUse it.\n"
+    )
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
+        )
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    runner = PiAgentRunner(command="pi", persist_session=False)
+    try:
+        result = runner.run(
+            AgentSpec(
+                "correctness",
+                "prompt",
+                ("input-manifest.json",),
+                skills=(AgentSkill("owned", owned, "sha256:owned"),),
+            ),
+            tmp_path,
+        )
+    finally:
+        runner.close()
+    assert result.ok
+    assert commands[0][commands[0].index("--skill") + 1] == str(owned)
+    assert commands[0].count("--skill") == 1
+
+
+def test_verify_harness_command_accepts_required_contract(monkeypatch):
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        if "--version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="pi 1.0", stderr="")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="--no-skills --skill --no-extensions --no-context-files",
+            stderr="",
+        )
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    assert verify_harness_command("pi", "pi") == "pi 1.0"
+
+
+def test_verify_harness_command_rejects_unknown_and_missing_flags(monkeypatch):
+    with pytest.raises(HarnessError, match="unsupported"):
+        verify_harness_command("other", "other")
+
+    monkeypatch.setattr(
+        "review_bot.agents.runner.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="codex", stderr=""),
+    )
+    with pytest.raises(HarnessError, match="lacks required"):
+        verify_harness_command("codex", "codex")
 
 
 def test_codex_runner_validates_output(tmp_path: Path):

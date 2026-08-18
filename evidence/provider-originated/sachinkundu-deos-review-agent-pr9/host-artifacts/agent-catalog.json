@@ -1,0 +1,41 @@
+{
+  "contract": "review-agent-catalog/v1",
+  "agents": [
+    {
+      "name": "correctness",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:4cb1c481af8d55198b51bab64a6cca7832cec958f94aad775a3b983926f0a624",
+      "description": "Finds concrete logic, error-path, claim, and lifecycle-ordering bugs.",
+      "skills": [],
+      "status": "selected",
+      "coordinator_policy": "Retain only a concrete logic, error-path, claim, or lifecycle failure with a specific failing input or state. Drop style, test-coverage, security, and architecture-opinion findings from this source."
+    },
+    {
+      "name": "api-reality",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:6d6950a861ad492f7ef65eb9d43d06b1fd8850d77288fdcebdc443731d77f677",
+      "description": "Verifies changed dependency and provider API usage against published contracts.",
+      "skills": [],
+      "status": "selected",
+      "coordinator_policy": "Retain only a provider or dependency API contradiction supported by a published documentation URL. Drop unverifiable API speculation and non-API logic or style findings from this source."
+    },
+    {
+      "name": "tests",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:9009a40a9aa5f8db92511be0d3bfef48ed401fba1f773e8691459734599bbcf7",
+      "description": "Finds concrete regression gaps and ineffective assertions for changed behavior.",
+      "skills": [],
+      "status": "selected",
+      "coordinator_policy": "Retain only a changed behavior with a credible regression that available tests cannot detect, plus one targeted input or assertion. Drop general coverage, organization, style, and duplicate correctness findings from this source."
+    },
+    {
+      "name": "safety",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:2a69502989167fb0cab930a2e8bd3d6a3934dba68b0540c81b104402cc468ab6",
+      "description": "Finds high-confidence usable hardcoded secrets and explicit injection paths.",
+      "skills": [],
+      "status": "selected",
+      "coordinator_policy": "Retain only one usable hardcoded-secret exposure or one explicit untrusted-input to command, query, template, or interpreter injection path with a concrete abuse case and remediation. Drop placeholders and general hardening advice from this source."
+    }
+  ]
+}

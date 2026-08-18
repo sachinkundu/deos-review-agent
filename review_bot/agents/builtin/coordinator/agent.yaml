@@ -1,0 +1,12 @@
+version: review-bot/v1
+name: coordinator
+kind: coordinator
+description: Deduplicates and validates the selected registered reviewers' attributed findings.
+prompt: prompt.md
+inputs:
+  - pr-context
+  - agent-catalog
+  - raw-findings
+  - provider-diff
+output_schema: review-result/v1
+order: 100

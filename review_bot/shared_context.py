@@ -16,7 +16,7 @@ SHARED_CONTEXT_NAME = "shared-context.md"
 
 
 def write_shared_context(
-    workdir: Path,
+    artifact_dir: Path,
     pr: PRInfo,
     bootstrap: BootstrapResult | None = None,
     linked_references: list[str] | None = None,
@@ -76,9 +76,10 @@ def write_shared_context(
         f"- Operator-only exclusion audit manifest: `{FILTER_MANIFEST_NAME}` "
         "(not assigned to review agents)"
     )
-    lines.append("- The repository is checked out at the PR head commit in this directory.")
+    lines.append("- The clean repository is available separately as `repository/`.")
     lines.append("")
 
-    context_path = workdir / SHARED_CONTEXT_NAME
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    context_path = artifact_dir / SHARED_CONTEXT_NAME
     context_path.write_text("\n".join(lines), encoding="utf-8")
     return context_path

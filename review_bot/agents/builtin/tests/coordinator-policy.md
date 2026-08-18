@@ -1,0 +1,1 @@
+Retain only a changed behavior with a credible regression that available tests cannot detect, plus one targeted input or assertion. Drop general coverage, organization, style, and duplicate correctness findings from this source.

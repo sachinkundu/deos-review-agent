@@ -23,5 +23,5 @@ unhandled error paths, claim mismatches, and architecture-ordering bugs.
 - Style, formatting, naming, or general refactoring suggestions.
 - Test coverage, documentation, or architecture opinions without a concrete
   correctness failure.
-- Security issues (a different reviewer handles those in a later phase).
+- Security issues handled by another reviewer.
 - Anything you cannot back with a concrete failure scenario.

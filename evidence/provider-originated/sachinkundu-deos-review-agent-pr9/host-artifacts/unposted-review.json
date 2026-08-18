@@ -1,0 +1,13 @@
+{
+  "commit_id": "222bc619927b31107d8a3d8b3711347b1b1646e4",
+  "event": "REQUEST_CHANGES",
+  "body": "## review-bot — automated correctness review\n\nThe changed fixture contains a concrete command-injection vulnerability: untrusted input is embedded in a shell command and executed with shell interpretation enabled. The reported location matches the added line in the provider diff.\n\n**Result:** patch is incorrect (confidence 1.0) — 1 finding(s); 1 critical.\n",
+  "comments": [
+    {
+      "path": "provider-proof/insecure_shell_fixture.py",
+      "side": "RIGHT",
+      "line": 8,
+      "body": "**User input is interpolated into a shell command** (critical, confidence 1.0)\n\nThe attacker-controlled `user_input` is interpolated directly into a command passed to `sh -c`, and `shell=True` executes the resulting string. An input such as `ok'; touch /tmp/pwned; #'` changes the command structure and executes an additional command with the process's privileges. Avoid invoking a shell for untrusted input; use a fixed executable with an argument list and `shell=False`, or strictly allowlist permitted commands and arguments.\n\n**Suggested fix:** Replace shell-string construction with a fixed executable and argument vector, or validate the command against a strict allowlist before execution.\n\n```\n    subprocess.run([\"/usr/bin/allowed-command\", user_input], check=True)\n```"
+    }
+  ]
+}

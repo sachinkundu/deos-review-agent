@@ -22,18 +22,25 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import __version__
+from .agents.registry import RegistryError, discover_agent_registry
 from .agents.runner import (
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_MAX_CONCURRENCY,
     AgentRunner,
     AgentSpec,
     CodexAgentRunner,
+    HarnessError,
     PiAgentRunner,
     run_agents_concurrently,
+    verify_harness_command,
 )
-from .coordinator import CoordinatorError, run_coordinator, write_raw_findings
+from .coordinator import (
+    CoordinatorError,
+    run_coordinator,
+    validate_result_identities,
+    write_raw_findings,
+)
 from .diff_filter import (
-    PROVIDER_DIFF_NAME,
-    REVIEW_DIFF_NAME,
     DiffFilterError,
     write_diff_artifacts,
 )
@@ -47,12 +54,18 @@ from .github import (
     event_for_findings,
     parse_pr_url,
 )
+from .resources import (
+    ResourceError,
+    ResourceResolver,
+    validate_workspace_isolation,
+    write_registry_artifacts,
+)
 from .schema import SchemaError, validate_review_output
-from .shared_context import SHARED_CONTEXT_NAME, write_shared_context
+from .shared_context import write_shared_context
 from .workspace import DEFAULT_BOOTSTRAP_TIMEOUT, PRWorkspace, WorkspaceError
 
-PROMPTS_DIR = Path(__file__).parent / "prompts"
 DEFAULT_WORKSPACE_ROOT = Path.home() / "review-bot-workspaces"
+UNPOSTED_REVIEW_NAME = "unposted-review.json"
 
 # Exit codes: 0 ok/skip, 1 usage/credentials, 2 workspace, 3 all agents failed,
 # 4 coordinator failed, 5 stale head, 6 GitHub API error, 7 schema error.
@@ -101,12 +114,6 @@ def build_credentials() -> Credentials:
         private_key_path=key_path,
         bot_username=bot_username,
     )
-
-
-def _load_prompt(name: str) -> str:
-    text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
-    shared = (PROMPTS_DIR / "shared-rules.md").read_text(encoding="utf-8")
-    return text.replace("{{shared_rules}}", shared)
 
 
 def build_review_body(
@@ -187,6 +194,11 @@ class RunOptions:
             args.agent_thinking or os.environ.get("REVIEW_AGENT_THINKING") or "high"
         )
         self.persist_agent_session: bool = not args.no_agent_session
+        self.max_agent_concurrency: int = int(
+            args.max_agent_concurrency
+            or os.environ.get("REVIEW_MAX_AGENT_CONCURRENCY")
+            or DEFAULT_MAX_CONCURRENCY
+        )
 
 
 def build_agent_runner(
@@ -197,15 +209,19 @@ def build_agent_runner(
     persist_session: bool = True,
 ) -> AgentRunner:
     """Construct the agent runner for ``command``."""
-    if command == "codex":
+    harness = Path(command).name
+    verify_harness_command(command, harness)
+    if harness == "codex":
         return CodexAgentRunner(command=command, model=model, timeout=timeout)
-    return PiAgentRunner(
-        command=command,
-        model=model,
-        thinking=thinking,
-        timeout=timeout,
-        persist_session=persist_session,
-    )
+    if harness == "pi":
+        return PiAgentRunner(
+            command=command,
+            model=model,
+            thinking=thinking,
+            timeout=timeout,
+            persist_session=persist_session,
+        )
+    raise HarnessError(f"unsupported review harness command: {command!r}")
 
 
 def run_review(
@@ -243,12 +259,24 @@ def run_review(
         help="thinking level for pi driver (off/minimal/low/medium/high/xhigh/max)",
     )
     parser.add_argument("--agent-command", default=None, help="agent CLI command (default: pi)")
+    parser.add_argument(
+        "--max-agent-concurrency",
+        type=int,
+        default=None,
+        help=f"maximum concurrent reviewers (default: {DEFAULT_MAX_CONCURRENCY})",
+    )
     args = parser.parse_args(argv)
 
     try:
         owner, repo, number = parse_pr_url(args.pr_url)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        registry = discover_agent_registry()
+    except RegistryError as e:
+        print(f"error: agent registry invalid: {e}", file=sys.stderr)
         return 1
 
     try:
@@ -259,6 +287,9 @@ def run_review(
 
     client = client_factory(creds)
     opts = RunOptions(args)
+    if opts.max_agent_concurrency < 1:
+        print("error: max agent concurrency must be at least 1", file=sys.stderr)
+        return 1
     workspace = workspace_factory(
         opts.workspace_root, owner, repo, number, bootstrap_timeout=opts.bootstrap_timeout
     )
@@ -299,7 +330,7 @@ def run_review(
 
     try:
         bootstrap = workspace.run_bootstrap(
-            workspace.workdir,
+            workspace.source_dir,
             extra_env={
                 "REVIEW_PR_URL": args.pr_url,
                 "REVIEW_HEAD_SHA": pr.head_sha,
@@ -311,43 +342,64 @@ def run_review(
             return 2
 
         try:
-            diff_artifact_writer(workspace.workdir, diff_text)
+            if diff_artifact_writer is write_diff_artifacts:
+                diff_artifact_writer(
+                    workspace.artifact_dir,
+                    diff_text,
+                    repository=workspace.source_dir,
+                )
+            else:
+                diff_artifact_writer(workspace.artifact_dir, diff_text)
         except DiffFilterError as e:
             print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
             return 2
-        write_shared_context(workspace.workdir, pr, bootstrap)
+        write_shared_context(workspace.artifact_dir, pr, bootstrap)
 
-        runner = runner_factory(
-            command=opts.agent_command,
-            model=opts.model,
-            thinking=opts.agent_thinking,
-            timeout=opts.agent_timeout,
-            persist_session=opts.persist_agent_session,
-        )
         try:
-            specs = [
-                AgentSpec(
-                    "correctness",
-                    _load_prompt("correctness.md"),
-                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
-                ),
-                AgentSpec(
-                    "api-reality",
-                    _load_prompt("api-reality.md"),
-                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
-                ),
-                AgentSpec(
-                    "tests",
-                    _load_prompt("tests.md"),
-                    (SHARED_CONTEXT_NAME, REVIEW_DIFF_NAME),
-                ),
-                AgentSpec(
-                    "safety",
-                    _load_prompt("safety.md"),
-                    (SHARED_CONTEXT_NAME, PROVIDER_DIFF_NAME),
-                ),
-            ]
-            agent_results = run_agents_concurrently(runner, specs, workspace.workdir)
+            validate_workspace_isolation(workspace.source_dir, workspace.artifact_dir)
+            runner = runner_factory(
+                command=opts.agent_command,
+                model=opts.model,
+                thinking=opts.agent_thinking,
+                timeout=opts.agent_timeout,
+                persist_session=opts.persist_agent_session,
+            )
+        except (HarnessError, ResourceError) as e:
+            print(f"error: review harness setup failed: {e}", file=sys.stderr)
+            return 2
+
+        harness = Path(opts.agent_command).name
+        resolver = ResourceResolver(workspace.source_dir, workspace.artifact_dir)
+        try:
+            write_registry_artifacts(workspace.artifact_dir, registry, harness)
+            invocations: list[tuple[AgentSpec, Path]] = []
+            for agent in registry.reviewers:
+                capsule = resolver.create_capsule(agent)
+                invocations.append(
+                    (
+                        AgentSpec(
+                            name=agent.name,
+                            prompt=agent.prompt_text(),
+                            input_files=capsule.input_files,
+                            contract_version=agent.contract_version,
+                            package_digest=agent.package_digest,
+                            skills=agent.skills,
+                            package_dir=agent.package_dir,
+                        ),
+                        capsule.root,
+                    )
+                )
+            agent_results = run_agents_concurrently(
+                runner,
+                invocations,
+                max_concurrency=opts.max_agent_concurrency,
+            )
+
+            try:
+                validate_result_identities(registry, agent_results)
+            except CoordinatorError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 4
 
             failures = [r for r in agent_results if not r.ok]
             successful = [r for r in agent_results if r.ok]
@@ -360,13 +412,28 @@ def run_review(
                 )
                 return 3
 
-            write_raw_findings(workspace.workdir, agent_results)
+            write_raw_findings(workspace.artifact_dir, agent_results)
             try:
-                review = run_coordinator(runner, workspace.workdir)
-            except CoordinatorError as e:
+                coordinator = registry.coordinator
+                capsule = resolver.create_capsule(coordinator)
+                spec = AgentSpec(
+                    name=coordinator.name,
+                    prompt=coordinator.prompt_text(),
+                    input_files=capsule.input_files,
+                    contract_version=coordinator.contract_version,
+                    package_digest=coordinator.package_digest,
+                    skills=coordinator.skills,
+                    package_dir=coordinator.package_dir,
+                )
+                review = run_coordinator(runner, spec, capsule.root)
+            except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 4
+        except (HarnessError, ResourceError, RegistryError) as e:
+            print(f"error: isolated agent invocation failed: {e}", file=sys.stderr)
+            return 2
         finally:
+            resolver.close()
             if hasattr(runner, "close"):
                 runner.close()
 
@@ -397,6 +464,10 @@ def run_review(
         comments = build_inline_comments(outcome.attachable)
         body = build_review_body(review, failures, outcome.unattachable, len(review["findings"]))
         payload = {"commit_id": pr.head_sha, "event": event, "body": body, "comments": comments}
+        (workspace.artifact_dir / UNPOSTED_REVIEW_NAME).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
         print(
             f"review ready: event={event} findings={len(review['findings'])} "

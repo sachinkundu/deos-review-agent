@@ -199,13 +199,15 @@ class GitBlobReader:
 
 
 def write_diff_artifacts(
-    workdir: Path,
+    artifact_dir: Path,
     provider_diff: str,
     *,
+    repository: Path | None = None,
     blob_reader: GitBlobReader | None = None,
 ) -> DiffArtifacts:
     """Write the full diff, filtered diff, and deterministic exclusion manifest."""
-    reader = blob_reader or GitBlobReader(workdir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    reader = blob_reader or GitBlobReader(repository or artifact_dir)
     sections = split_diff_sections(provider_diff)
     retained: list[str] = []
     exclusions: list[DiffExclusion] = []
@@ -221,9 +223,9 @@ def write_diff_artifacts(
         else:
             exclusions.append(exclusion)
 
-    provider_path = workdir / PROVIDER_DIFF_NAME
-    review_path = workdir / REVIEW_DIFF_NAME
-    manifest_path = workdir / FILTER_MANIFEST_NAME
+    provider_path = artifact_dir / PROVIDER_DIFF_NAME
+    review_path = artifact_dir / REVIEW_DIFF_NAME
+    manifest_path = artifact_dir / FILTER_MANIFEST_NAME
     provider_path.write_text(provider_diff, encoding="utf-8")
     review_path.write_text("".join(retained), encoding="utf-8")
     manifest = {"version": 1, "exclusions": [asdict(item) for item in exclusions]}

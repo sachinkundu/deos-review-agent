@@ -1,0 +1,51 @@
+{
+  "agents": [
+    {
+      "agent": "correctness",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:4cb1c481af8d55198b51bab64a6cca7832cec958f94aad775a3b983926f0a624",
+      "status": "completed",
+      "findings": []
+    },
+    {
+      "agent": "api-reality",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:6d6950a861ad492f7ef65eb9d43d06b1fd8850d77288fdcebdc443731d77f677",
+      "status": "completed",
+      "findings": []
+    },
+    {
+      "agent": "tests",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:9009a40a9aa5f8db92511be0d3bfef48ed401fba1f773e8691459734599bbcf7",
+      "status": "completed",
+      "findings": []
+    },
+    {
+      "agent": "safety",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:2a69502989167fb0cab930a2e8bd3d6a3934dba68b0540c81b104402cc468ab6",
+      "status": "completed",
+      "findings": [
+        {
+          "title": "User input is interpolated into a shell command",
+          "body": "The attacker-controlled `user_input` is interpolated directly into `sh -c` while `shell=True` executes the resulting string. An input such as `ok'; touch /tmp/pwned; #'` changes the command structure and executes an additional command with the process's privileges. Avoid invoking a shell for untrusted input; use a fixed executable with an argument list and `shell=False`, or strictly allowlist the permitted commands and arguments.",
+          "code_location": {
+            "absolute_file_path": "provider-proof/insecure_shell_fixture.py",
+            "line_range": {
+              "start": 8,
+              "end": 8
+            }
+          },
+          "suggested_fix": {
+            "description": "Replace shell-string construction with a fixed executable and argument vector, or validate the command against a strict allowlist before execution.",
+            "replacement": "    subprocess.run([\"/usr/bin/allowed-command\", user_input], check=True)"
+          },
+          "priority": 2,
+          "confidence_score": 1.0,
+          "source_agent": "safety"
+        }
+      ]
+    }
+  ]
+}

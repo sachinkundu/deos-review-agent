@@ -1,0 +1,51 @@
+{
+  "contract": "review-harness-isolation-proof/v1",
+  "harness": "pi",
+  "command": "pi",
+  "model_override": "openrouter/openai/gpt-5.6-luna",
+  "cases": [
+    {
+      "case": "prompt-only",
+      "configured_skills": [],
+      "ok": true,
+      "duration_seconds": 5.191,
+      "markers_observed": [
+        "PROMPT_ONLY_OK"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    },
+    {
+      "case": "one-skill",
+      "configured_skills": [
+        "alpha-proof"
+      ],
+      "ok": true,
+      "duration_seconds": 8.194,
+      "markers_observed": [
+        "ALPHA_NATIVE_731"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    },
+    {
+      "case": "multiple-skills",
+      "configured_skills": [
+        "beta-proof",
+        "gamma-proof"
+      ],
+      "ok": true,
+      "duration_seconds": 7.62,
+      "markers_observed": [
+        "BETA_NATIVE_419",
+        "GAMMA_NATIVE_863"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    }
+  ],
+  "passed": true
+}

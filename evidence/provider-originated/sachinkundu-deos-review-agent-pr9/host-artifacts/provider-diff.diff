@@ -1,0 +1,14 @@
+diff --git a/provider-proof/insecure_shell_fixture.py b/provider-proof/insecure_shell_fixture.py
+new file mode 100644
+index 0000000..65d4e4f
+--- /dev/null
++++ b/provider-proof/insecure_shell_fixture.py
+@@ -0,0 +1,8 @@
++"""Controlled unsafe fixture used only to prove provider-originated review comments."""
++
++import subprocess
++
++
++def run_user_command(user_input: str) -> None:
++    """Deliberately vulnerable: the review bot must flag this changed line."""
++    subprocess.run(f"sh -c '{user_input}'", shell=True, check=True)

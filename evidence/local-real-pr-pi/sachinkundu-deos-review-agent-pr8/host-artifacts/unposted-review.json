@@ -1,0 +1,13 @@
+{
+  "commit_id": "9cbc0c2a4e41737740a6f5fc86b9b0bcd011ee32",
+  "event": "COMMENT",
+  "body": "## review-bot — automated correctness review\n\nThe planning artifacts otherwise preserve the intended agent registration, resource isolation, coordination, and validation contracts. However, the Codex adapter design depends on CLI flags that are not present in the published Codex CLI contract, so an implementation following the design may fail before launching agents.\n\n**Result:** patch is incorrect (confidence 0.88) — 1 finding(s).\n",
+  "comments": [
+    {
+      "path": "openspec/changes/discoverable-review-agent-skills/design.md",
+      "side": "RIGHT",
+      "line": 266,
+      "body": "**Codex adapter specifies undocumented CLI flags** (warning, confidence 0.88)\n\nThe design requires invoking Codex with `--ignore-user-config` and `--ignore-rules`, but these are not documented Codex CLI options. The published Codex CLI reference does not define either flag: https://developers.openai.com/codex/cli/reference/. Implementing this literally can cause Codex startup to fail with an unknown-option error instead of isolating the invocation. Use only documented isolation mechanisms and verify the exact installed-version command contract.\n\n**Suggested fix:** Remove the undocumented flags and specify a supported isolation approach, such as temporary CODEX_HOME/HOME roots and documented configuration options, verified against the pinned Codex version."
+    }
+  ]
+}
