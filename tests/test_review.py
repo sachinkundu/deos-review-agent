@@ -12,7 +12,7 @@ from review_bot.agents.registry import AgentRegistry, discover_agent_registry, l
 from review_bot.agents.runner import AgentResult
 from review_bot.diff_filter import DiffFilterError
 from review_bot.github import Credentials, GitHubAppClient, GitHubError, PRInfo
-from review_bot.review import build_review_body, run_review, run_status
+from review_bot.review import build_review_body, run_cleanup, run_review, run_status
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
 
@@ -1529,6 +1529,26 @@ def test_cleanup_failure_finalizes_surviving_snapshot(tmp_path: Path, sample_dif
     snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
     assert snapshot["overall"] == {"phase": "cleanup", "state": "failed"}
     assert snapshot["final_exit_code"] == 1
+
+
+def test_cleanup_command_handles_filesystem_failure(tmp_path: Path, capsys):
+    class FailingRemovalWorkspace(FakeWorkspace):
+        def remove(self) -> None:
+            raise PermissionError("permission denied")
+
+    workspace = FailingRemovalWorkspace(tmp_path, "owner", "repo", 7)
+    workspace.workdir.mkdir(parents=True)
+
+    assert (
+        run_cleanup(
+            ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+            workspace_factory=lambda *args, **kwargs: workspace,
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error: workspace cleanup failed: permission denied" in captured.err
 
 
 def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff, capsys):

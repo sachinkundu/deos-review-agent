@@ -875,7 +875,11 @@ def run_cleanup(
     )
     workspace = workspace_factory(root, owner, repo, number)
     removed = workspace.workdir.exists()
-    workspace.remove()
+    try:
+        workspace.remove()
+    except OSError as e:
+        print(f"error: workspace cleanup failed: {e}", file=sys.stderr)
+        return 1
     print(f"{'removed' if removed else 'already absent'}: {workspace.workdir}")
     return 0
 

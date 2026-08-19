@@ -349,9 +349,10 @@ def test_posix_termination_kills_group_after_leader_exits(monkeypatch):
             return 0
 
     signals: list[tuple[int, int]] = []
-    monotonic = iter((0.0, 2.0))
+    monotonic = iter((0.0, 0.5, 2.0))
 
     monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         runner_module.os,
         "killpg",
@@ -360,7 +361,11 @@ def test_posix_termination_kills_group_after_leader_exits(monkeypatch):
 
     runner_module._terminate_processes([ExitedLeader()])  # type: ignore[arg-type,reportPrivateUsage]
 
-    assert signals == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
+    assert signals == [
+        (4321, signal.SIGTERM),
+        (4321, 0),
+        (4321, signal.SIGKILL),
+    ]
 
 
 def test_process_registered_during_interrupt_is_terminated(monkeypatch):
