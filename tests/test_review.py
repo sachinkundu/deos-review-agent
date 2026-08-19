@@ -1016,6 +1016,27 @@ def test_json_progress_stderr_stays_parseable_when_existing_diagnostics_are_emit
     assert all(event["contract"] == "review-progress-event/v1" for event in events)
 
 
+@pytest.mark.parametrize(
+    "progress_args",
+    (["--progress", "json"], ["--progress=json"]),
+)
+def test_json_progress_routes_argparse_errors_away_from_stderr(progress_args, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                *progress_args,
+                "--agent-timeout",
+                "not-an-integer",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert captured.err == ""
+    assert "invalid int value" in captured.out
+
+
 def test_status_reads_snapshot_without_provider_or_file_mutation(
     tmp_path: Path, sample_diff, capsys
 ):

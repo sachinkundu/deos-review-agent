@@ -241,7 +241,9 @@ def build_agent_runner(
 
 
 def _review_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="review-bot", description="Review a GitHub PR (Phase 2).")
+    parser = argparse.ArgumentParser(
+        prog="review-bot", description="Review a GitHub PR (Phase 2).", allow_abbrev=False
+    )
     parser.add_argument("--version", action="version", version=f"review-bot {__version__}")
     parser.add_argument("pr_url", help="GitHub pull request URL")
     parser.add_argument(
@@ -284,6 +286,14 @@ def _review_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _json_progress_requested(argv: list[str]) -> bool:
+    return any(
+        argument == "--progress=json"
+        or (argument == "--progress" and index + 1 < len(argv) and argv[index + 1] == "json")
+        for index, argument in enumerate(argv)
+    )
+
+
 def _skip_phases(
     progress: ProgressController,
     phases: tuple[Phase, ...],
@@ -302,7 +312,11 @@ def run_review(
     workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
     diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
 ) -> int:
-    args = _review_parser().parse_args(argv)
+    parse_diagnostics = (
+        redirect_stderr(sys.stdout) if _json_progress_requested(argv) else nullcontext()
+    )
+    with parse_diagnostics:
+        args = _review_parser().parse_args(argv)
     try:
         target = parse_pr_url(args.pr_url)
     except ValueError as exc:
