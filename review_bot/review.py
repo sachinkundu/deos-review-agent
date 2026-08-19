@@ -707,13 +707,13 @@ def _run_review_pipeline(
             except Exception:
                 progress.phase(Phase.CLEANUP, State.FAILED, "workspace cleanup failed")
                 raise
+            progress.detach_store()
             progress.phase(
                 Phase.CLEANUP,
                 State.SUCCEEDED,
                 "workspace cleanup succeeded",
                 update_overall=False,
             )
-            progress.detach_store()
 
 
 def run_cleanup(

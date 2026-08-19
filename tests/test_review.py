@@ -1134,7 +1134,7 @@ def test_cleanup_failure_finalizes_surviving_snapshot(tmp_path: Path, sample_dif
     assert snapshot["final_exit_code"] == 1
 
 
-def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff):
+def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff, capsys):
     class RemovingWorkspace(FakeWorkspace):
         def remove(self) -> None:
             self.removed = True
@@ -1147,7 +1147,7 @@ def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff):
                 "https://github.com/owner/repo/pull/7",
                 "--dry-run",
                 "--progress",
-                "off",
+                "json",
                 "--workspace-root",
                 str(tmp_path),
             ],
@@ -1158,4 +1158,9 @@ def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff):
         )
         == 0
     )
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert all(event["message"] != "progress snapshot persistence disabled" for event in events)
+    assert events[-2]["phase"] == "cleanup"
+    assert events[-2]["state"] == "succeeded"
+    assert events[-1]["message"] == "run finished"
     assert not workspace.workdir.exists()
