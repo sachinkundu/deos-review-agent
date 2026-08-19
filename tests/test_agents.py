@@ -213,6 +213,48 @@ def test_waiting_reviewers_remain_queued_until_worker_is_available():
     assert [result.name for result in completed[0]] == ["first", "second"]
 
 
+def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monkeypatch):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+
+    class BlockingRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            else:
+                second_started.set()
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    class InterruptingCompletionIterator:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            assert first_started.wait(timeout=2)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        runner_module,
+        "as_completed",
+        lambda futures: InterruptingCompletionIterator(),
+    )
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_agents_concurrently(BlockingRunner(), invocations, max_concurrency=1)
+        assert not second_started.is_set()
+    finally:
+        release_first.set()
+    time.sleep(0.05)
+    assert not second_started.is_set()
+
+
 def test_progress_callback_failures_do_not_change_agent_results():
     runner = FakeAgentRunner(
         {

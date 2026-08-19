@@ -181,10 +181,17 @@ class RichProgressRenderer:
         State.INTERRUPTED.value: "bold magenta",
     }
 
-    def __init__(self, stream: IO[str], no_color: bool = False):
+    def __init__(
+        self,
+        stream: IO[str],
+        no_color: bool = False,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ):
         self._lock = threading.RLock()
         self._snapshot: dict[str, Any] | None = None
         self._event: dict[str, Any] | None = None
+        self._monotonic_clock = monotonic_clock
+        self._snapshot_monotonic = monotonic_clock()
         self._console = Console(file=stream, no_color=no_color)
         self._live = Live(
             _LiveProgressView(self),
@@ -200,22 +207,17 @@ class RichProgressRenderer:
         with self._lock:
             self._event = dict(event)
             self._snapshot = snapshot
+            self._snapshot_monotonic = self._monotonic_clock()
             if not self._started:
                 self._live.start(refresh=True)
                 self._started = True
             else:
                 self._live.refresh()
 
-    @staticmethod
-    def _live_elapsed(item: dict[str, Any]) -> float:
+    def _live_elapsed(self, item: dict[str, Any]) -> float:
         elapsed = float(item["elapsed_seconds"])
-        started_at = item.get("started_at")
-        if item.get("state") == State.RUNNING.value and isinstance(started_at, str):
-            try:
-                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                elapsed = max(elapsed, (utc_now() - started).total_seconds())
-            except ValueError:
-                pass
+        if item.get("state") == State.RUNNING.value:
+            elapsed += max(0.0, self._monotonic_clock() - self._snapshot_monotonic)
         return elapsed
 
     def build_table(self) -> Table:
@@ -290,13 +292,45 @@ def load_snapshot_schema() -> dict[str, Any]:
 
 def validate_snapshot(data: Any) -> None:
     errors = sorted(
-        jsonschema.Draft202012Validator(load_snapshot_schema()).iter_errors(data),
+        jsonschema.Draft202012Validator(
+            load_snapshot_schema(), format_checker=jsonschema.FormatChecker()
+        ).iter_errors(data),
         key=lambda error: list(error.absolute_path),
     )
     if errors:
         error = errors[0]
         location = ".".join(str(part) for part in error.absolute_path) or "<root>"
         raise ProgressError(f"invalid progress snapshot at {location}: {error.message}")
+    snapshot = cast(dict[str, Any], data)
+    timestamp_fields: list[tuple[str, str | None]] = [
+        ("started_at", snapshot["started_at"]),
+        ("updated_at", snapshot["updated_at"]),
+        ("finished_at", snapshot["finished_at"]),
+    ]
+    for index, item in enumerate(snapshot["reviewers"]):
+        timestamp_fields.extend(
+            (
+                (f"reviewers.{index}.started_at", item["started_at"]),
+                (f"reviewers.{index}.finished_at", item["finished_at"]),
+            )
+        )
+    coordinator = snapshot["coordinator"]
+    if coordinator is not None:
+        timestamp_fields.extend(
+            (
+                ("coordinator.started_at", coordinator["started_at"]),
+                ("coordinator.finished_at", coordinator["finished_at"]),
+            )
+        )
+    for location, value in timestamp_fields:
+        if value is None:
+            continue
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ProgressError(
+                f"invalid progress snapshot at {location}: {value!r} is not a valid date-time"
+            ) from exc
 
 
 class AtomicSnapshotStore:

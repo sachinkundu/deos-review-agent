@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -160,7 +160,10 @@ def run_agents_concurrently(
         _notify(on_queued, spec)
 
     results: list[AgentResult | None] = [None] * len(invocations)
-    with ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency)) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency))
+    interrupted = False
+    futures: dict[Future[AgentResult], int] = {}
+    try:
         futures = {
             pool.submit(_one, invocation): index for index, invocation in enumerate(invocations)
         }
@@ -168,6 +171,15 @@ def run_agents_concurrently(
             result = future.result()
             results[futures[future]] = result
             _notify(on_settled, result)
+    except BaseException:
+        interrupted = True
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        if not interrupted:
+            pool.shutdown(wait=True)
     return [result for result in results if result is not None]
 
 

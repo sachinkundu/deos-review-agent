@@ -123,6 +123,34 @@ def test_renderer_selection_uses_stderr_tty_and_honors_explicit_modes(monkeypatc
     no_color.close()
 
 
+def test_rich_live_elapsed_advances_only_from_monotonic_time(monkeypatch):
+    monotonic = [100.0]
+    renderer = RichProgressRenderer(
+        io.StringIO(), no_color=True, monotonic_clock=lambda: monotonic[0]
+    )
+    item = {
+        "name": "correctness",
+        "state": "running",
+        "started_at": "2026-08-19T10:00:00.000Z",
+        "finished_at": None,
+        "elapsed_seconds": 5.0,
+        "timeout_seconds": 30,
+        "error_summary": None,
+    }
+    snapshot = {
+        "overall": {"phase": "reviewers", "state": "running"},
+        "reviewers": [item],
+        "coordinator": None,
+    }
+    renderer.render({"phase": "reviewers", "state": "running", "elapsed_seconds": 5.0}, snapshot)
+    monkeypatch.setattr("review_bot.progress.utc_now", lambda: datetime(2099, 1, 1, tzinfo=UTC))
+    monotonic[0] += 7.0
+    try:
+        assert renderer._live_elapsed(item) == 12.0  # type: ignore[reportPrivateUsage]
+    finally:
+        renderer.close()
+
+
 def test_snapshot_is_exact_schema_and_tracks_registry_order(tmp_path: Path):
     stream = io.StringIO()
     clock = Clock()
@@ -213,6 +241,9 @@ def test_snapshot_schema_rejects_extra_fields_and_bad_timestamps(tmp_path: Path)
     snapshot.pop("unexpected")
     snapshot["started_at"] = "not-a-time"
     with pytest.raises(ProgressError, match="does not match"):
+        validate_snapshot(snapshot)
+    snapshot["started_at"] = "2026-99-99T25:61:61Z"
+    with pytest.raises(ProgressError, match="date-time"):
         validate_snapshot(snapshot)
 
 
