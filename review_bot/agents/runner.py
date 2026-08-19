@@ -15,7 +15,8 @@ import shutil
 import subprocess
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -129,11 +130,24 @@ def run_agents_concurrently(
     runner: AgentRunner,
     invocations: list[tuple[AgentSpec, Path]],
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    on_queued: Callable[[AgentSpec], None] | None = None,
+    on_started: Callable[[AgentSpec], None] | None = None,
+    on_settled: Callable[[AgentResult], None] | None = None,
 ) -> list[AgentResult]:
-    """Run every invocation with bounded concurrency; keep registry order."""
+    """Run with bounded concurrency, immediate callbacks, and registry order."""
+
+    def _notify(callback: Callable | None, value: object) -> None:
+        if callback is None:
+            return
+        try:
+            callback(value)
+        except Exception:
+            # Progress observers must never replace or reorder review results.
+            return
 
     def _one(invocation: tuple[AgentSpec, Path]) -> AgentResult:
         spec, workdir = invocation
+        _notify(on_started, spec)
         return runner.run(spec, workdir)
 
     if not invocations:
@@ -142,8 +156,19 @@ def run_agents_concurrently(
         raise ValueError("max_concurrency must be at least 1")
     for spec, _workdir in invocations:
         verify_spec_package(spec)
+    for spec, _workdir in invocations:
+        _notify(on_queued, spec)
+
+    results: list[AgentResult | None] = [None] * len(invocations)
     with ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency)) as pool:
-        return list(pool.map(_one, invocations))
+        futures = {
+            pool.submit(_one, invocation): index for index, invocation in enumerate(invocations)
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            results[futures[future]] = result
+            _notify(on_settled, result)
+    return [result for result in results if result is not None]
 
 
 def verify_spec_package(spec: AgentSpec) -> None:

@@ -22,6 +22,8 @@ and optional orchestration integration.
   before inspecting a pull request.
 - Run every registered reviewer with bounded concurrency. Safety receives the
   complete provider diff; filtered reviewers receive only the filtered diff.
+- Show truthful pipeline and reviewer progress as work starts and settles while
+  preserving registry-ordered results for coordination and artifacts.
 - Load only an agent's own application-provided optional skills through Pi or
   Codex native Agent Skills support. User and pull-request skill discovery is
   disabled, and Codex runs fail closed if the container has admin skills under
@@ -51,7 +53,40 @@ With `--keep-workspace`, operators can inspect the exact checkout under
 - `raw-findings.json` — roster-ordered, identity-bearing successes, empty
   results, and failures passed to the coordinator; and
 - `unposted-review.json` — the exact review payload retained before dry-run or
-  posting.
+  posting; and
+- `progress.json` — the latest complete, sanitized
+  `review-progress-snapshot/v1` state, atomically replaced after each observable
+  transition.
+
+## Progress and retained status
+
+Review runs accept `--progress auto|plain|json|off` and default to `auto`:
+
+- `auto` uses a colorful Rich live view when standard error is an interactive
+  terminal and stable plain lines otherwise;
+- `plain` writes one human-readable transition per standard-error line;
+- `json` writes only `review-progress-event/v1` JSON objects to standard error,
+  one per line; existing diagnostics are preserved on standard output so the
+  event stream remains independently parseable; and
+- `off` suppresses all new progress output without changing review behavior.
+
+Progress shows pipeline phases, every selected reviewer in registry order,
+immediate settlement, elapsed time, configured timeouts, partial failures, and
+handled interruption. It never shows percentages or model ETAs, and it does not
+retain credentials, prompts, model input/output, finding bodies, repository
+contents, or subprocess commands.
+
+Inspect a retained workspace without GitHub authentication, model execution,
+posting, or file mutation:
+
+```bash
+review-bot status https://github.com/OWNER/REPO/pull/NUMBER
+review-bot status https://github.com/OWNER/REPO/pull/NUMBER --json
+```
+
+Use `--workspace-root PATH` when the run used a non-default root. A normal run
+still removes the entire PR workspace, including `progress.json`; use
+`--keep-workspace` when retained status is required.
 
 ## Development notes
 

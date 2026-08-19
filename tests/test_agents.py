@@ -129,6 +129,116 @@ def test_concurrency_is_bounded_and_result_order_is_stable():
     assert [result.name for result in results] == [spec.name for spec in specs]
 
 
+def test_concurrent_callbacks_show_all_queued_then_immediate_settlement():
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    events: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    class OutOfOrderRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                assert release_first.wait(timeout=2)
+            else:
+                second_finished.set()
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def record(kind: str, name: str) -> None:
+        with lock:
+            events.append((kind, name))
+
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+
+    def release_after_second() -> None:
+        assert second_finished.wait(timeout=2)
+        release_first.set()
+
+    releaser = threading.Thread(target=release_after_second)
+    releaser.start()
+    results = run_agents_concurrently(
+        OutOfOrderRunner(),
+        invocations,
+        max_concurrency=2,
+        on_queued=lambda spec: record("queued", spec.name),
+        on_started=lambda spec: record("started", spec.name),
+        on_settled=lambda result: record("settled", result.name),
+    )
+    releaser.join()
+
+    assert events[:2] == [("queued", "first"), ("queued", "second")]
+    assert events.index(("settled", "second")) < events.index(("settled", "first"))
+    assert [result.name for result in results] == ["first", "second"]
+
+
+def test_waiting_reviewers_remain_queued_until_worker_is_available():
+    first_started = threading.Event()
+    release_first = threading.Event()
+    events: list[tuple[str, str]] = []
+
+    class BlockingRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+    completed: list[list[AgentResult]] = []
+
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            run_agents_concurrently(
+                BlockingRunner(),
+                invocations,
+                max_concurrency=1,
+                on_queued=lambda spec: events.append(("queued", spec.name)),
+                on_started=lambda spec: events.append(("started", spec.name)),
+            )
+        )
+    )
+    thread.start()
+    assert first_started.wait(timeout=2)
+    assert events[:2] == [("queued", "first"), ("queued", "second")]
+    assert ("started", "first") in events
+    assert ("started", "second") not in events
+    release_first.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert [result.name for result in completed[0]] == ["first", "second"]
+
+
+def test_progress_callback_failures_do_not_change_agent_results():
+    runner = FakeAgentRunner(
+        {
+            "first": make_review(findings=[]),
+            "second": Exception("agent failed"),
+        }
+    )
+
+    def broken_callback(value) -> None:
+        raise OSError("observer unavailable")
+
+    results = run_agents_concurrently(
+        runner,
+        [
+            (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+            (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+        ],
+        on_queued=broken_callback,
+        on_started=broken_callback,
+        on_settled=broken_callback,
+    )
+    assert [result.name for result in results] == ["first", "second"]
+    assert results[0].ok
+    assert not results[1].ok
+
+
 def test_package_mutation_blocks_launch_before_any_runner_starts(tmp_path: Path):
     package = tmp_path / "agent"
     package.mkdir()
