@@ -22,6 +22,7 @@ from review_bot.progress import (
     State,
     create_renderer,
     curated_message,
+    format_status,
     read_snapshot,
     validate_snapshot,
 )
@@ -155,6 +156,34 @@ def test_snapshot_is_exact_schema_and_tracks_registry_order(tmp_path: Path):
     assert snapshot["reviewers"][1]["elapsed_seconds"] == 4.5
     assert snapshot["reviewers"][1]["error_summary"] == "reviewer failed"
     assert snapshot["final_exit_code"] == 3
+
+
+def test_individual_settlement_does_not_claim_roster_success_early(tmp_path: Path):
+    controller = _controller("off", io.StringIO(), Clock(), tmp_path)
+    controller.phase(Phase.REVIEWERS, State.RUNNING, "reviewer roster running")
+    controller.reviewer_started("correctness", 30)
+    controller.reviewer_started("tests", 30)
+    controller.reviewer_settled("correctness", ok=True)
+
+    snapshot = read_snapshot(tmp_path / "progress.json")
+    assert snapshot["reviewers"][0]["state"] == "succeeded"
+    assert snapshot["reviewers"][1]["state"] == "running"
+    assert snapshot["overall"] == {"phase": "reviewers", "state": "running"}
+    controller.interrupt()
+    controller.close()
+
+
+def test_human_status_advances_elapsed_time_for_active_work(monkeypatch, tmp_path: Path):
+    clock = Clock()
+    controller = _controller("off", io.StringIO(), clock, tmp_path)
+    controller.coordinator_started()
+    snapshot = read_snapshot(tmp_path / "progress.json")
+    monkeypatch.setattr("review_bot.progress.utc_now", lambda: clock.wall + timedelta(seconds=12))
+
+    status = format_status(snapshot)
+    assert "coordinator coordinator: running elapsed=12.0s/30s" in status
+    controller.interrupt()
+    controller.close()
 
 
 def test_snapshot_schema_rejects_extra_fields_and_bad_timestamps(tmp_path: Path):

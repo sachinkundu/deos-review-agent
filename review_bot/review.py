@@ -511,6 +511,7 @@ def _run_review_pipeline(
                         capsule.root,
                     )
                 )
+            progress.phase(Phase.REVIEWERS, State.RUNNING, "reviewer roster running")
             agent_results = run_agents_concurrently(
                 runner,
                 invocations,

@@ -518,6 +518,7 @@ class ProgressController:
             "reviewer queued",
             subject=name,
             timeout_seconds=timeout_seconds,
+            update_overall=False,
         )
 
     def reviewer_started(self, name: str, timeout_seconds: float) -> None:
@@ -533,6 +534,7 @@ class ProgressController:
             "reviewer running",
             subject=name,
             timeout_seconds=timeout_seconds,
+            update_overall=False,
         )
 
     def reviewer_settled(self, name: str, ok: bool, timed_out: bool = False) -> None:
@@ -557,6 +559,7 @@ class ProgressController:
             else "reviewer failed",
             subject=name,
             timeout_seconds=item.timeout_seconds,
+            update_overall=False,
         )
 
     def coordinator_started(self) -> None:
@@ -668,6 +671,17 @@ def read_snapshot(path: Path) -> dict[str, Any]:
 
 
 def format_status(snapshot: dict[str, Any]) -> str:
+    def elapsed(item: dict[str, Any]) -> float:
+        value = float(item["elapsed_seconds"])
+        started_at = item.get("started_at")
+        if item.get("state") == State.RUNNING.value and isinstance(started_at, str):
+            try:
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                value = max(value, (utc_now() - started).total_seconds())
+            except ValueError:
+                pass
+        return value
+
     overall = snapshot["overall"]
     assert isinstance(overall, dict)
     lines = [
@@ -682,14 +696,14 @@ def format_status(snapshot: dict[str, Any]) -> str:
         assert isinstance(raw, dict)
         lines.append(
             f"reviewer {raw['name']}: {raw['state']} "
-            f"elapsed={float(raw['elapsed_seconds']):.1f}s/"
+            f"elapsed={elapsed(raw):.1f}s/"
             f"{float(raw['timeout_seconds']):g}s"
         )
     coordinator = snapshot.get("coordinator")
     if isinstance(coordinator, dict):
         lines.append(
             f"coordinator {coordinator['name']}: {coordinator['state']} "
-            f"elapsed={float(coordinator['elapsed_seconds']):.1f}s/"
+            f"elapsed={elapsed(coordinator):.1f}s/"
             f"{float(coordinator['timeout_seconds']):g}s"
         )
     lines.append(f"exit: {snapshot['final_exit_code']}")
