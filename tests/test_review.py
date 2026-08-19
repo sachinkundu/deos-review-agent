@@ -551,6 +551,10 @@ def test_run_review_workspace_cleanup_and_artifact_retention(
 
     assert exit_code == 0
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert [event["state"] for event in events if event["phase"] == "registry"] == [
+        "running",
+        "succeeded",
+    ]
     assert events[-2]["phase"] == "cleanup"
     assert events[-1]["message"] == "run finished"
     assert workspace.removed is removed
@@ -956,6 +960,35 @@ def test_bootstrap_failure_skips_every_downstream_phase(tmp_path: Path, sample_d
         "posting",
         "cleanup",
     ]
+
+
+def test_successful_cleanup_restores_prior_failure_phase(tmp_path: Path, sample_diff, capsys):
+    from review_bot.workspace import BootstrapResult
+
+    class FailingBootstrapWorkspace(FakeWorkspace):
+        def run_bootstrap(self, workdir: Path, extra_env=None):
+            return BootstrapResult(ran=True, ok=False, exit_code=9, output_tail="failed")
+
+    workspace = FailingBootstrapWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    cleanup_states = [event["state"] for event in events if event["phase"] == "cleanup"]
+    assert exit_code == 2
+    assert cleanup_states == ["running", "succeeded"]
+    assert events[-1]["phase"] == "bootstrap"
+    assert events[-1]["state"] == "failed"
 
 
 def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff, capsys):

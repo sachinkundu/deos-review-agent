@@ -720,6 +720,14 @@ class ProgressController:
             with self._lock:
                 self._review_url = review_url
 
+    def current_overall(self) -> tuple[Phase, State]:
+        with self._lock:
+            return Phase(self._overall["phase"]), State(self._overall["state"])
+
+    def restore_overall(self, phase: Phase, state: State) -> None:
+        with self._lock:
+            self._overall = {"phase": phase.value, "state": state.value}
+
     def finish(self, exit_code: int) -> None:
         with self._lock:
             wall_now, mono_now = self._now()

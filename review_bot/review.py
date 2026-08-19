@@ -541,7 +541,7 @@ def _run_review_pipeline(
             raise
         progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "diff artifacts ready")
 
-        progress.phase(Phase.REGISTRY, State.RUNNING, "review harness setup running")
+        progress.phase(Phase.REVIEWERS, State.RUNNING, "review harness setup running")
         try:
             validate_workspace_isolation(workspace.source_dir, workspace.artifact_dir)
             runner = runner_factory(
@@ -552,11 +552,10 @@ def _run_review_pipeline(
                 persist_session=opts.persist_agent_session,
             )
         except (HarnessError, ResourceError) as e:
-            progress.phase(Phase.REGISTRY, State.FAILED, "review harness setup failed")
+            progress.phase(Phase.REVIEWERS, State.FAILED, "review harness setup failed")
             _skip_phases(
                 progress,
                 (
-                    Phase.REVIEWERS,
                     Phase.COORDINATION,
                     Phase.SCHEMA_VALIDATION,
                     Phase.DIFF_VALIDATION,
@@ -569,12 +568,10 @@ def _run_review_pipeline(
             )
             print(f"error: review harness setup failed: {e}", file=sys.stderr)
             return 2
-        progress.phase(Phase.REGISTRY, State.SUCCEEDED, "review harness setup succeeded")
 
         harness = Path(opts.agent_command).name
         resolver = ResourceResolver(workspace.source_dir, workspace.artifact_dir)
         try:
-            progress.phase(Phase.REVIEWERS, State.RUNNING, "reviewer preparation running")
             write_registry_artifacts(workspace.artifact_dir, registry, harness)
             invocations: list[tuple[AgentSpec, Path]] = []
             for agent in registry.reviewers:
@@ -810,6 +807,7 @@ def _run_review_pipeline(
         return 0
     finally:
         cleanup_started_normally = sys.exc_info()[0] is None
+        prior_overall = progress.current_overall()
         if opts.keep_workspace:
             progress.phase(
                 Phase.CLEANUP,
@@ -836,6 +834,8 @@ def _run_review_pipeline(
                 "workspace cleanup succeeded",
                 update_overall=False,
             )
+            if cleanup_started_normally:
+                progress.restore_overall(*prior_overall)
 
 
 def run_cleanup(
