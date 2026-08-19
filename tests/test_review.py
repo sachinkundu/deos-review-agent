@@ -599,6 +599,34 @@ def test_invalid_progress_fails_before_registry_credentials_or_provider(
     assert called == []
 
 
+def test_malformed_url_fails_before_progress_registry_credentials_or_provider(
+    monkeypatch, tmp_path: Path, capsys
+):
+    called: list[str] = []
+    monkeypatch.setattr(
+        "review_bot.review.discover_agent_registry", lambda: called.append("registry")
+    )
+    workspace_root = tmp_path / "workspaces"
+
+    exit_code = run_review(
+        [
+            "not-a-pull-request-url",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(workspace_root),
+        ],
+        client_factory=lambda creds: called.append("provider"),  # type: ignore[arg-type]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert called == []
+    assert captured.err == ""
+    assert "not a GitHub pull request URL" in captured.out
+    assert not workspace_root.exists()
+
+
 def test_negative_agent_timeout_fails_before_provider_work(tmp_path: Path):
     provider_calls: list[str] = []
 
@@ -1014,6 +1042,7 @@ def test_handled_interrupt_retains_interrupted_state_and_reraises(tmp_path: Path
         )
     snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
     assert snapshot["overall"]["state"] == "interrupted"
+    assert snapshot["final_exit_code"] == 130
     assert any(item["state"] == "interrupted" for item in snapshot["reviewers"])
     assert all(item["state"] != "queued" for item in snapshot["reviewers"])
     assert workspace.removed is False

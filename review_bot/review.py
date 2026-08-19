@@ -303,6 +303,12 @@ def run_review(
     diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
 ) -> int:
     args = _review_parser().parse_args(argv)
+    try:
+        target = parse_pr_url(args.pr_url)
+    except ValueError as exc:
+        destination = sys.stdout if args.progress == "json" else sys.stderr
+        print(f"error: {exc}", file=destination)
+        return 1
     progress = ProgressController(args.progress)
     diagnostics = redirect_stderr(sys.stdout) if args.progress == "json" else nullcontext()
     try:
@@ -311,6 +317,7 @@ def run_review(
                 exit_code = _run_review_pipeline(
                     args,
                     progress,
+                    target,
                     client_factory=client_factory,
                     runner_factory=runner_factory,
                     workspace_factory=workspace_factory,
@@ -339,17 +346,13 @@ def run_review(
 def _run_review_pipeline(
     args: argparse.Namespace,
     progress: ProgressController,
+    target: tuple[str, str, int],
     client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
     runner_factory: Callable[..., AgentRunner] = build_agent_runner,
     workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
     diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
 ) -> int:
-
-    try:
-        owner, repo, number = parse_pr_url(args.pr_url)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
+    owner, repo, number = target
 
     progress.phase(Phase.REGISTRY, State.RUNNING, "agent registry discovery running")
     try:

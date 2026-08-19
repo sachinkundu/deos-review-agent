@@ -701,6 +701,7 @@ class ProgressController:
                         item.elapsed_seconds = max(0.0, mono_now - item.started_monotonic)
                     if was_running:
                         item.error_summary = "interrupted"
+            self._final_exit_code = 130
             self._finished_at = format_utc(wall_now)
         phase = Phase(self._overall["phase"])
         self._publish(phase, State.INTERRUPTED, "run interrupted")
