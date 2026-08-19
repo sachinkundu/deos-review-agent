@@ -231,7 +231,6 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
 
         def interrupt(self) -> None:
             interrupt_called.set()
-            release_first.set()
 
     class InterruptingCompletionIterator:
         def __iter__(self):
@@ -252,9 +251,12 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
     ]
 
     try:
+        started = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
             run_agents_concurrently(BlockingRunner(), invocations, max_concurrency=1)
+        assert time.monotonic() - started < 1.0
         assert interrupt_called.is_set()
+        assert not release_first.is_set()
         assert not second_started.is_set()
     finally:
         release_first.set()
@@ -291,10 +293,49 @@ def test_pi_interrupt_terminates_active_subprocess_promptly():
     assert completed[0].returncode != 0
 
 
+def test_process_registered_during_interrupt_is_terminated(monkeypatch):
+    runner = PiAgentRunner(command="pi")
+    real_popen = subprocess.Popen
+    process_created = threading.Event()
+    release_registration = threading.Event()
+    spawned: list[subprocess.Popen[str]] = []
+    completed: list[subprocess.CompletedProcess[str]] = []
+
+    def delayed_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        process_created.set()
+        assert release_registration.wait(timeout=2)
+        return process
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", delayed_popen)
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            runner._run_process(  # type: ignore[reportPrivateUsage]
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        )
+    )
+    thread.start()
+    assert process_created.wait(timeout=2)
+    runner.interrupt()
+    release_registration.set()
+    thread.join(timeout=2)
+    runner.close()
+
+    assert not thread.is_alive()
+    assert spawned[0].returncode != 0
+    assert completed[0].returncode != 0
+
+
 def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
     second_started = threading.Event()
     release_second = threading.Event()
     captured: list[BaseException] = []
+    settled: list[str] = []
 
     class ExceptionalRunner(AgentRunner):
         def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
@@ -314,6 +355,7 @@ def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
                     (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
                 ],
                 max_concurrency=2,
+                on_settled=lambda result: settled.append(result.name),
             )
         except BaseException as exc:
             captured.append(exc)
@@ -328,6 +370,7 @@ def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
     assert not thread.is_alive()
     assert len(captured) == 1
     assert isinstance(captured[0], OSError)
+    assert settled == ["second"]
 
 
 def test_progress_callback_failures_do_not_change_agent_results():

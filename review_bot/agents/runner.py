@@ -126,6 +126,7 @@ class AgentRunner:
     def __init__(self) -> None:
         self._process_lock = threading.RLock()
         self._active_processes: set[subprocess.Popen[str]] = set()
+        self._terminating = False
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         raise NotImplementedError
@@ -134,6 +135,7 @@ class AgentRunner:
         if not hasattr(self, "_process_lock"):
             self._process_lock = threading.RLock()
             self._active_processes = set()
+            self._terminating = False
         return self._process_lock, self._active_processes
 
     def _run_process(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
@@ -142,6 +144,9 @@ class AgentRunner:
         def register(process: subprocess.Popen[str]) -> None:
             with lock:
                 processes.add(process)
+                terminating = self._terminating
+            if terminating:
+                _terminate_processes([process])
 
         def unregister(process: subprocess.Popen[str]) -> None:
             with lock:
@@ -153,6 +158,7 @@ class AgentRunner:
         """Terminate every in-flight agent process before interruption propagates."""
         lock, processes = self._process_state()
         with lock:
+            self._terminating = True
             active = list(processes)
         _terminate_processes(active)
 
@@ -252,6 +258,20 @@ def run_agents_concurrently(
     pool = ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency))
     needs_shutdown = True
     futures: dict[Future[AgentResult], int] = {}
+    settled: set[Future[AgentResult]] = set()
+
+    def _settle_completed() -> None:
+        for future, index in futures.items():
+            if future in settled or not future.done() or future.cancelled():
+                continue
+            try:
+                result = future.result()
+            except BaseException:
+                continue
+            results[index] = result
+            settled.add(future)
+            _notify(on_settled, result)
+
     try:
         futures = {
             pool.submit(_one, invocation): index for index, invocation in enumerate(invocations)
@@ -259,8 +279,10 @@ def run_agents_concurrently(
         for future in as_completed(futures):
             result = future.result()
             results[futures[future]] = result
+            settled.add(future)
             _notify(on_settled, result)
     except KeyboardInterrupt:
+        _settle_completed()
         with suppress(Exception):
             runner.interrupt()
         for future in futures:
@@ -273,6 +295,7 @@ def run_agents_concurrently(
             future.cancel()
         pool.shutdown(wait=True, cancel_futures=True)
         needs_shutdown = False
+        _settle_completed()
         raise
     finally:
         if needs_shutdown:
