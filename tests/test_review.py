@@ -774,6 +774,38 @@ def test_unexpected_exception_finalizes_retained_progress(tmp_path: Path, sample
     assert snapshot["final_exit_code"] == 1
 
 
+def test_raw_findings_write_failure_is_attributed_to_coordination(
+    tmp_path: Path, sample_diff, monkeypatch
+):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    def broken_writer(workdir: Path, results: list[object]):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("review_bot.review.write_raw_findings", broken_writer)
+    with pytest.raises(OSError, match="disk unavailable"):
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                "--keep-workspace",
+                "--progress",
+                "off",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+            runner_factory=_make_runner_factory(make_review(findings=[])),
+            workspace_factory=lambda *args, **kwargs: workspace,
+            diff_artifact_writer=_fake_diff_artifact_writer,
+        )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert snapshot["overall"] == {"phase": "coordination", "state": "failed"}
+    assert [item["state"] for item in snapshot["reviewers"]] == ["succeeded"] * 4
+    assert snapshot["coordinator"]["state"] == "failed"
+    assert snapshot["final_exit_code"] == 1
+
+
 def test_json_unexpected_exception_keeps_stderr_jsonl(tmp_path: Path, sample_diff, capsys):
     workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
 

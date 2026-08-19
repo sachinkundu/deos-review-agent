@@ -589,8 +589,9 @@ def _run_review_pipeline(
                 "reviewers settled with partial failures" if failures else "reviewers succeeded",
             )
 
-            write_raw_findings(workspace.artifact_dir, agent_results)
             try:
+                progress.coordinator_started()
+                write_raw_findings(workspace.artifact_dir, agent_results)
                 coordinator = registry.coordinator
                 capsule = resolver.create_capsule(coordinator)
                 spec = AgentSpec(
@@ -602,7 +603,6 @@ def _run_review_pipeline(
                     skills=coordinator.skills,
                     package_dir=coordinator.package_dir,
                 )
-                progress.coordinator_started()
                 review = run_coordinator(runner, spec, capsule.root)
                 progress.coordinator_settled(ok=True)
             except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
