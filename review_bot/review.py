@@ -486,6 +486,21 @@ def _run_review_pipeline(
         if not bootstrap.ok:
             bootstrap_state = State.TIMED_OUT if bootstrap.exit_code is None else State.FAILED
             progress.phase(Phase.BOOTSTRAP, bootstrap_state, "repository bootstrap failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.REGISTRY,
+                    Phase.REVIEWERS,
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "bootstrap unavailable",
+                update_overall=False,
+            )
             print(f"error: bootstrap failed: {bootstrap.summary}", file=sys.stderr)
             return 2
         progress.phase(
@@ -506,6 +521,21 @@ def _run_review_pipeline(
                 diff_artifact_writer(workspace.artifact_dir, diff_text)
         except DiffFilterError as e:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.REGISTRY,
+                    Phase.REVIEWERS,
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "diff artifacts unavailable",
+                update_overall=False,
+            )
             print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
             return 2
         write_shared_context(workspace.artifact_dir, pr, bootstrap)
@@ -523,6 +553,20 @@ def _run_review_pipeline(
             )
         except (HarnessError, ResourceError) as e:
             progress.phase(Phase.REGISTRY, State.FAILED, "review harness setup failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.REVIEWERS,
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "review harness unavailable",
+                update_overall=False,
+            )
             print(f"error: review harness setup failed: {e}", file=sys.stderr)
             return 2
         progress.phase(Phase.REGISTRY, State.SUCCEEDED, "review harness setup succeeded")
@@ -570,6 +614,19 @@ def _run_review_pipeline(
                 validate_result_identities(registry, agent_results)
             except CoordinatorError as e:
                 progress.phase(Phase.REVIEWERS, State.FAILED, "reviewer identity validation failed")
+                _skip_phases(
+                    progress,
+                    (
+                        Phase.COORDINATION,
+                        Phase.SCHEMA_VALIDATION,
+                        Phase.DIFF_VALIDATION,
+                        Phase.HEAD_FRESHNESS,
+                        Phase.PAYLOAD,
+                        Phase.POSTING,
+                    ),
+                    "reviewer results unavailable",
+                    update_overall=False,
+                )
                 print(f"error: {e}", file=sys.stderr)
                 return 4
 
@@ -639,6 +696,19 @@ def _run_review_pipeline(
                 return 4
         except (HarnessError, ResourceError, RegistryError) as e:
             progress.phase(Phase.REVIEWERS, State.FAILED, "isolated reviewer invocation failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "reviewer results unavailable",
+                update_overall=False,
+            )
             print(f"error: isolated agent invocation failed: {e}", file=sys.stderr)
             return 2
         finally:
@@ -652,6 +722,17 @@ def _run_review_pipeline(
             validate_review_output(review)
         except SchemaError as e:
             progress.phase(Phase.SCHEMA_VALIDATION, State.FAILED, "review schema invalid")
+            _skip_phases(
+                progress,
+                (
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "review schema invalid",
+                update_overall=False,
+            )
             print(f"error: {e}", file=sys.stderr)
             return 7
         progress.phase(Phase.SCHEMA_VALIDATION, State.SUCCEEDED, "review schema valid")

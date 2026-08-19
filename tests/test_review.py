@@ -894,7 +894,44 @@ def test_capsule_failure_has_running_then_failed_reviewer_progress(
     assert reviewer_states[1:] == ["failed", "failed"]
 
 
-def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff):
+def test_bootstrap_failure_skips_every_downstream_phase(tmp_path: Path, sample_diff, capsys):
+    from review_bot.workspace import BootstrapResult
+
+    class FailingBootstrapWorkspace(FakeWorkspace):
+        def run_bootstrap(self, workdir: Path, extra_env=None):
+            return BootstrapResult(ran=True, ok=False, exit_code=9, output_tail="failed")
+
+    workspace = FailingBootstrapWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert exit_code == 2
+    assert [event["phase"] for event in events if event["state"] == "skipped"] == [
+        "registry",
+        "reviewers",
+        "coordination",
+        "schema-validation",
+        "diff-validation",
+        "head-freshness",
+        "payload",
+        "posting",
+        "cleanup",
+    ]
+
+
+def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff, capsys):
     valid = make_review(findings=[], overall_correctness="patch is correct")
     invalid = dict(valid)
     invalid.pop("overall_confidence_score")
@@ -913,7 +950,7 @@ def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff)
             "https://github.com/owner/repo/pull/7",
             "--keep-workspace",
             "--progress",
-            "off",
+            "json",
             "--workspace-root",
             str(tmp_path),
         ],
@@ -927,6 +964,13 @@ def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff)
     assert exit_code == 7
     assert snapshot["overall"] == {"phase": "schema-validation", "state": "failed"}
     assert snapshot["final_exit_code"] == 7
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert [
+        event["phase"]
+        for event in events
+        if event["state"] == "skipped"
+        and event["phase"] in {"diff-validation", "head-freshness", "payload", "posting"}
+    ] == ["diff-validation", "head-freshness", "payload", "posting"]
 
 
 @pytest.mark.parametrize("failure_phase", ["head-freshness", "posting"])
