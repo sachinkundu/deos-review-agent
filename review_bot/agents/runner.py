@@ -96,6 +96,7 @@ class AgentResult:
     package_digest: str = ""
     output: dict | None = None
     error: str | None = None
+    timed_out: bool = False
     duration_seconds: float = 0.0
     extra: dict = field(default_factory=dict)
 
@@ -489,6 +490,7 @@ class CodexAgentRunner(AgentRunner):
                 package_digest=spec.package_digest,
                 ok=False,
                 error=f"agent timed out after {self.timeout}s",
+                timed_out=True,
                 duration_seconds=time.monotonic() - started,
             )
         except OSError as e:
@@ -604,6 +606,7 @@ class PiAgentRunner(AgentRunner):
                 package_digest=spec.package_digest,
                 ok=False,
                 error=f"agent timed out after {self.timeout}s",
+                timed_out=True,
             )
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
         per_agent_key = f"REVIEW_{spec.name.upper().replace('-', '_')}_THINKING"
@@ -651,6 +654,7 @@ class PiAgentRunner(AgentRunner):
                 package_digest=spec.package_digest,
                 ok=False,
                 error=f"agent timed out after {effective_timeout:g}s",
+                timed_out=True,
                 duration_seconds=time.monotonic() - started,
             )
         except OSError as e:

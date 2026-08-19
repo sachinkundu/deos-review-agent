@@ -21,6 +21,10 @@ RAW_FINDINGS_NAME = "raw-findings.json"
 class CoordinatorError(Exception):
     """The coordinator failed or produced invalid output; the run must stop."""
 
+    def __init__(self, message: str, *, timed_out: bool = False):
+        super().__init__(message)
+        self.timed_out = timed_out
+
 
 def write_raw_findings(workdir: Path, results: list[AgentResult]) -> Path:
     """Write the per-agent raw findings (with attribution) for the coordinator."""
@@ -76,7 +80,7 @@ def run_coordinator(runner: AgentRunner, spec: AgentSpec, workdir: Path) -> dict
     ):
         raise CoordinatorError("coordinator result identity does not match its trusted package")
     if not result.ok or result.output is None:
-        raise CoordinatorError(f"coordinator failed: {result.error}")
+        raise CoordinatorError(f"coordinator failed: {result.error}", timed_out=result.timed_out)
     # The `status` field must survive the coordinator rewrite (it is used by
     # callers to detect whether further review passes are expected).
     if result.output.get("status") not in ("no_further_concerns", "review_in_progress"):

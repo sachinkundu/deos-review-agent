@@ -562,7 +562,7 @@ def _run_review_pipeline(
                 on_settled=lambda result: progress.reviewer_settled(
                     result.name,
                     result.ok,
-                    timed_out=bool(result.error and "timed out" in result.error.lower()),
+                    timed_out=result.timed_out,
                 ),
             )
 
@@ -620,7 +620,9 @@ def _run_review_pipeline(
                 review = run_coordinator(runner, spec, capsule.root)
                 progress.coordinator_settled(ok=True)
             except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
-                progress.coordinator_settled(ok=False, timed_out="timed out" in str(e).lower())
+                progress.coordinator_settled(
+                    ok=False, timed_out=isinstance(e, CoordinatorError) and e.timed_out
+                )
                 print(f"error: {e}", file=sys.stderr)
                 return 4
         except (HarnessError, ResourceError, RegistryError) as e:
