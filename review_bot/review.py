@@ -323,6 +323,8 @@ def run_review(
                 )
             except KeyboardInterrupt:
                 progress.interrupt()
+                if args.progress == "json":
+                    return 130
                 raise
             except Exception as exc:
                 progress.finish(1)

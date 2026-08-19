@@ -1014,23 +1014,25 @@ def test_interrupt_preserves_active_phase_through_cleanup(tmp_path: Path, sample
             return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
 
     workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
-    with pytest.raises(KeyboardInterrupt):
-        run_review(
-            [
-                "https://github.com/owner/repo/pull/7",
-                "--progress",
-                "json",
-                "--workspace-root",
-                str(tmp_path),
-            ],
-            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
-            runner_factory=lambda **kwargs: InterruptingRunner(),
-            workspace_factory=lambda *args, **kwargs: workspace,
-            diff_artifact_writer=_fake_diff_artifact_writer,
-        )
-    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=lambda **kwargs: InterruptingRunner(),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    assert exit_code == 130
     assert events[-1]["phase"] == "reviewers"
     assert events[-1]["state"] == "interrupted"
+    assert "KeyboardInterrupt" not in captured.err
     assert workspace.removed is True
 
 
