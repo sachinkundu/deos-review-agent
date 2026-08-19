@@ -450,8 +450,6 @@ def _run_review_pipeline(
         progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
-    progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "provider diff loaded")
-
     try:
         progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
         try:
@@ -509,7 +507,6 @@ def _run_review_pipeline(
             "repository bootstrap succeeded" if bootstrap.ran else "no bootstrap configured",
         )
 
-        progress.phase(Phase.PROVIDER_DIFF, State.RUNNING, "diff artifacts constructing")
         try:
             if diff_artifact_writer is write_diff_artifacts:
                 diff_artifact_writer(
@@ -519,6 +516,7 @@ def _run_review_pipeline(
                 )
             else:
                 diff_artifact_writer(workspace.artifact_dir, diff_text)
+            write_shared_context(workspace.artifact_dir, pr, bootstrap)
         except DiffFilterError as e:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
             _skip_phases(
@@ -538,7 +536,9 @@ def _run_review_pipeline(
             )
             print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
             return 2
-        write_shared_context(workspace.artifact_dir, pr, bootstrap)
+        except OSError:
+            progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact persistence failed")
+            raise
         progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "diff artifacts ready")
 
         progress.phase(Phase.REGISTRY, State.RUNNING, "review harness setup running")

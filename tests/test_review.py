@@ -713,6 +713,33 @@ def test_bot_skip_reports_every_inapplicable_phase(tmp_path: Path, capsys):
     }
 
 
+def test_provider_diff_is_one_continuous_phase_through_artifact_construction(
+    tmp_path: Path, sample_diff, capsys
+):
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--dry-run",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: FakeWorkspace(tmp_path, "owner", "repo", 7),
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert exit_code == 0
+    assert [event["state"] for event in events if event["phase"] == "provider-diff"] == [
+        "running",
+        "succeeded",
+    ]
+
+
 def test_all_reviewer_failures_are_retained_and_later_phases_skipped(tmp_path: Path, sample_diff):
     workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
     runner = FakeAgentRunner(
