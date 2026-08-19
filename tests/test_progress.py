@@ -385,3 +385,47 @@ def test_snapshot_store_failure_emits_one_safe_json_diagnostic():
     assert len(diagnostics) == 1
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert "secret disk detail" not in stream.getvalue()
+
+    off_stream = io.StringIO()
+    off_controller = _controller("off", off_stream, Clock())
+    off_controller._store = BrokenStore()  # type: ignore[reportPrivateUsage]
+    off_controller._bound = controller._bound  # type: ignore[reportPrivateUsage]
+    off_controller.phase(Phase.REGISTRY, State.RUNNING, "registry running")
+    off_controller.close()
+    assert off_stream.getvalue() == ""
+
+
+def test_initial_snapshot_store_failure_emits_safe_diagnostic(monkeypatch, tmp_path: Path):
+    class BrokenStore:
+        def __init__(self, artifact_dir: Path):
+            self.artifact_dir = artifact_dir
+
+        def write(self, snapshot):
+            raise OSError("secret initial failure")
+
+    monkeypatch.setattr("review_bot.progress.AtomicSnapshotStore", BrokenStore)
+    stream = io.StringIO()
+    controller = _controller("json", stream, Clock())
+    controller.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
+    controller.bind_workspace(
+        tmp_path,
+        repository="owner/repo",
+        pull_request=7,
+        head_sha="abc",
+        dry_run=True,
+        harness="pi",
+        max_concurrency=1,
+        reviewer_names=["correctness"],
+        coordinator_name="coordinator",
+        timeout_seconds=30,
+    )
+    controller.phase(Phase.BOOTSTRAP, State.RUNNING, "repository bootstrap running")
+    controller.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    diagnostics = [
+        event for event in events if event["message"] == "progress snapshot persistence disabled"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["phase"] == "workspace"
+    assert "secret initial failure" not in stream.getvalue()

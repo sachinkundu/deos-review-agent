@@ -123,15 +123,11 @@ class ProgressRenderer(Protocol):
 
 
 class NullProgressRenderer:
-    def __init__(self, stream: IO[str]):
-        self.stream = stream
-
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
         return
 
     def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
-        self.stream.write(f"warning: {event['message']}\n")
-        self.stream.flush()
+        return
 
     def close(self) -> None:
         return
@@ -322,7 +318,7 @@ def create_renderer(mode: str, stream: IO[str] | None = None) -> ProgressRendere
     if mode == "auto":
         selected = "rich" if output.isatty() else "plain"
     if selected == "off":
-        return NullProgressRenderer(output)
+        return NullProgressRenderer()
     if selected == "plain":
         return PlainProgressRenderer(output)
     if selected == "json":
@@ -489,6 +485,16 @@ class ProgressController:
             event["timeout_seconds"] = timeout_seconds
         return event
 
+    def _render_diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        if not self._renderer_healthy:
+            return
+        try:
+            self._renderer.diagnostic(event, snapshot)
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            self._renderer_healthy = False
+            with suppress(Exception):  # pragma: no cover - best-effort restoration
+                self._renderer.close()
+
     def _publish(
         self,
         phase: Phase,
@@ -529,12 +535,13 @@ class ProgressController:
             if self._renderer_healthy:
                 try:
                     self._renderer.render(event, snapshot)
-                    if observer_event is not None:
-                        self._renderer.diagnostic(observer_event, snapshot)
                 except (AttributeError, OSError, RuntimeError, ValueError):
                     self._renderer_healthy = False
                     with suppress(Exception):  # pragma: no cover - best-effort restoration
                         self._renderer.close()
+                else:
+                    if observer_event is not None:
+                        self._render_diagnostic(observer_event, snapshot)
 
     def phase(
         self, phase: Phase, state: State, message: str, *, update_overall: bool = True
@@ -601,6 +608,16 @@ class ProgressController:
                 self._store.write(snapshot)
             except (OSError, ProgressError):
                 self._store_healthy = False
+                phase = Phase(self._overall["phase"])
+                state = State(self._overall["state"])
+                event = self._event(
+                    phase,
+                    state,
+                    "progress snapshot persistence disabled",
+                    wall_now,
+                    mono_now,
+                )
+                self._render_diagnostic(event, snapshot)
 
     def reviewer_queued(self, name: str, timeout_seconds: float) -> None:
         self._publish(
