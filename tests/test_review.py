@@ -625,6 +625,77 @@ def test_all_reviewer_failures_are_retained_and_later_phases_skipped(tmp_path: P
     assert snapshot["final_exit_code"] == 3
 
 
+def test_reviewer_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff):
+    from review_bot.agents.runner import AgentResult
+
+    final = make_review(findings=[], overall_correctness="patch is correct")
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    runner = FakeAgentRunner(
+        {
+            "correctness": AgentResult(
+                name="correctness", ok=False, error="agent timed out after 30s"
+            ),
+            "api-reality": final,
+            "tests": final,
+            "safety": final,
+            "coordinator": final,
+        }
+    )
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--dry-run",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 0
+    assert snapshot["reviewers"][0]["state"] == "timed-out"
+    assert snapshot["reviewers"][0]["error_summary"] == "reviewer timed out"
+
+
+def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff):
+    final = make_review(findings=[], overall_correctness="patch is correct")
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    runner = FakeAgentRunner(
+        {
+            "correctness": final,
+            "api-reality": final,
+            "tests": final,
+            "safety": final,
+            "coordinator": Exception("agent timed out after 30s"),
+        }
+    )
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 4
+    assert snapshot["coordinator"]["state"] == "timed-out"
+    assert snapshot["coordinator"]["error_summary"] == "coordinator timed out"
+
+
 def test_json_progress_stderr_stays_parseable_when_existing_diagnostics_are_emitted(
     tmp_path: Path, sample_diff, capsys
 ):
