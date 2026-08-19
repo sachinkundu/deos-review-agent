@@ -583,6 +583,37 @@ def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path)
     assert "x" * 81 in repair_prompt
 
 
+def test_pi_schema_repair_shares_the_agent_timeout_budget(monkeypatch, tmp_path: Path):
+    clock = [100.0]
+    timeouts: list[float | None] = []
+    invalid = make_review()
+
+    def fake_run_once(spec, prompt_file, workdir, *, timeout=None):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock[0] += 7.0
+            return AgentResult(
+                name=spec.name,
+                ok=False,
+                error="schema invalid",
+                extra={"invalid_output": invalid},
+            )
+        clock[0] += 3.0
+        return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    monkeypatch.setattr("review_bot.agents.runner.time.monotonic", lambda: clock[0])
+    runner = PiAgentRunner(command="pi", timeout=10)
+    monkeypatch.setattr(runner, "_run_once", fake_run_once)
+    try:
+        result = runner.run(AgentSpec("tests", "prompt", ()), tmp_path)
+    finally:
+        runner.close()
+
+    assert result.ok
+    assert timeouts == [10, 3.0]
+    assert result.duration_seconds == 10.0
+
+
 def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
     commands: list[list[str]] = []
 

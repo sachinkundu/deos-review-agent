@@ -545,8 +545,24 @@ class PiAgentRunner(AgentRunner):
         self.interrupt()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _run_once(self, spec: AgentSpec, prompt_file: Path, workdir: Path) -> AgentResult:
+    def _run_once(
+        self,
+        spec: AgentSpec,
+        prompt_file: Path,
+        workdir: Path,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResult:
         started = time.monotonic()
+        effective_timeout = self.timeout if timeout is None else max(0.0, timeout)
+        if effective_timeout == 0:
+            return AgentResult(
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent timed out after {self.timeout}s",
+            )
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
         per_agent_key = f"REVIEW_{spec.name.upper().replace('-', '_')}_THINKING"
         thinking = os.environ.get(per_agent_key) or self.thinking
@@ -583,7 +599,7 @@ class PiAgentRunner(AgentRunner):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=effective_timeout,
                 cwd=str(workdir),
             )
         except subprocess.TimeoutExpired:
@@ -592,7 +608,7 @@ class PiAgentRunner(AgentRunner):
                 contract_version=spec.contract_version,
                 package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent timed out after {self.timeout}s",
+                error=f"agent timed out after {effective_timeout:g}s",
                 duration_seconds=time.monotonic() - started,
             )
         except OSError as e:
@@ -633,10 +649,11 @@ class PiAgentRunner(AgentRunner):
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         verify_spec_package(spec)
+        started = time.monotonic()
         prompt_file = self._tmpdir / f"{spec.name}-prompt.md"
         prompt_file.write_text(spec.prompt, encoding="utf-8")
 
-        result = self._run_once(spec, prompt_file, workdir)
+        result = self._run_once(spec, prompt_file, workdir, timeout=self.timeout)
         invalid_output = result.extra.get("invalid_output")
         if result.ok or invalid_output is None:
             return result
@@ -661,7 +678,14 @@ class PiAgentRunner(AgentRunner):
             spec.skills,
             spec.package_dir,
         )
-        repaired = self._run_once(repair_spec, repair_prompt_file, workdir)
+        remaining = max(0.0, self.timeout - (time.monotonic() - started))
+        repaired = self._run_once(
+            repair_spec,
+            repair_prompt_file,
+            workdir,
+            timeout=remaining,
+        )
+        repaired.duration_seconds = time.monotonic() - started
         if not repaired.ok:
             repaired.error = f"{result.error}; schema repair failed: {repaired.error}"
         return repaired

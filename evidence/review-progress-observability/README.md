@@ -127,7 +127,7 @@ cc901155757cee0f46c5967834d38e20f45d2ca50a3a6daf4ae4cd837a7d121e
 ## Deterministic gates
 
 ```text
-uv run pytest                                      214 passed
+uv run pytest                                      215 passed
 uv run ruff format --check review_bot tests        41 files formatted
 uv run ruff check review_bot tests                 passed
 uv run pyright review_bot tests                    0 errors
@@ -143,4 +143,4 @@ status. Commit `7fcd883` fixed both, added regressions, and the clean run above
 is the rerun after those fixes. Subsequent GitHub review feedback added coverage
 for terminal event publication, interrupted queued reviewers, cleanup failures,
 JSON-stream purity, negative timeouts, and interrupt cleanup ordering; the full
-214-test gate above includes those regressions.
+215-test gate above includes those regressions.
