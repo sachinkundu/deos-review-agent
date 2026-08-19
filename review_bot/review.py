@@ -458,7 +458,6 @@ def _run_review_pipeline(
             progress.phase(Phase.WORKSPACE, State.FAILED, "exact-head workspace setup failed")
             print(f"error: workspace setup failed: {e}", file=sys.stderr)
             return 2
-        progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
         progress.bind_workspace(
             workspace.artifact_dir,
             repository=f"{owner}/{repo}",
@@ -471,6 +470,7 @@ def _run_review_pipeline(
             coordinator_name=registry.coordinator.name,
             timeout_seconds=opts.agent_timeout,
         )
+        progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
 
         progress.phase(Phase.BOOTSTRAP, State.RUNNING, "repository bootstrap running")
         bootstrap = workspace.run_bootstrap(

@@ -1406,6 +1406,42 @@ def test_interrupt_preserves_active_phase_through_cleanup(tmp_path: Path, sample
     assert workspace.removed is True
 
 
+def test_workspace_success_interrupt_is_retained_after_binding(
+    monkeypatch, tmp_path: Path, sample_diff
+):
+    from review_bot.progress import Phase, ProgressController, State
+
+    original_phase = ProgressController.phase
+
+    def interrupt_workspace_success(self, phase, state, message, **kwargs):
+        if phase == Phase.WORKSPACE and state == State.SUCCEEDED:
+            raise KeyboardInterrupt
+        return original_phase(self, phase, state, message, **kwargs)
+
+    monkeypatch.setattr(ProgressController, "phase", interrupt_workspace_success)
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                "--keep-workspace",
+                "--progress",
+                "off",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+            workspace_factory=lambda *args, **kwargs: workspace,
+            diff_artifact_writer=_fake_diff_artifact_writer,
+        )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert snapshot["overall"] == {"phase": "workspace", "state": "interrupted"}
+    assert snapshot["final_exit_code"] == 130
+    assert workspace.removed is False
+
+
 def test_cleanup_interrupt_is_attributed_to_cleanup(tmp_path: Path, sample_diff, capsys):
     class InterruptingRemovalWorkspace(FakeWorkspace):
         def remove(self) -> None:
