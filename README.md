@@ -22,8 +22,11 @@ and optional orchestration integration.
   before inspecting a pull request.
 - Run every registered reviewer with bounded concurrency. Safety receives the
   complete provider diff; filtered reviewers receive only the filtered diff.
-- Load only an agent's own optional skills through Pi or Codex native Agent
-  Skills support, with ambient and pull-request skill discovery disabled.
+- Load only an agent's own application-provided optional skills through Pi or
+  Codex native Agent Skills support. User and pull-request skill discovery is
+  disabled, and Codex runs fail closed if the container has admin skills under
+  `/etc/codex/skills`. OpenAI-bundled system skills remain part of the trusted
+  Codex harness rather than the per-agent application registry.
 - Run the registered roster-agnostic coordinator with an identity-bearing agent
   catalog and attributed results.
 - Validate every finding against the complete provider diff and current head SHA.
@@ -61,4 +64,6 @@ With `--keep-workspace`, operators can inspect the exact checkout under
 - Supported harnesses are detected explicitly. Pi is launched with ambient
   resources disabled and explicit `--skill` paths. Codex is launched from an
   isolated capsule with clean `HOME` and `CODEX_HOME`, ignored user config and
-  rules, and only the owning agent's staged skills.
+  rules, only the owning agent's staged application skills, and a fail-closed
+  check for container-admin skills. Codex-bundled system skills are trusted as
+  part of the selected harness binary.

@@ -19,7 +19,9 @@ The pull-request checkout and ambient user configuration are untrusted inputs to
 - Let the trusted host discover and validate agent packages without a Python roster.
 - Let the coordinator discover the selected run roster from generated catalog data rather than a role list embedded in its prompt.
 - Preserve explicit least-privilege inputs, a shared output schema, deterministic artifacts, partial failures, and bounded parallelism.
-- Load an agent's skills natively in Pi and Codex while excluding target-repository and ambient skills.
+- Load an agent's application-provided skills natively in Pi and Codex while
+  excluding target-repository, user, and container-admin skills. Treat
+  provider-bundled system skills as part of the trusted harness binary.
 - Keep the exact source checkout separate from all host-created diffs, manifests, results, and invocation capsules.
 
 **Non-Goals:**
@@ -266,7 +268,7 @@ Alternative considered: keep artifacts in the source checkout and omit unassigne
 
 For Pi, pass the agent prompt through its normal prompt mechanism, add `--no-skills`, and add one `--skill <trusted-path>` argument for each optional skill. No skill arguments are needed for a prompt-only agent.
 
-For Codex, create clean temporary `HOME` and `CODEX_HOME` directories for every invocation. Forward only the minimum authentication material supported by the installed Codex version into the temporary `CODEX_HOME`, with restrictive permissions; never preserve or link the real `CODEX_HOME` because it may contain ambient skills, plugins, configuration, or other instructions. Use `--ignore-user-config` and `--ignore-rules`, stage only this agent's optional skills under the capsule's `.agents/skills`, launch from the capsule with a read-only sandbox, and clean up authentication material and the capsule after output capture.
+For Codex, create clean temporary `HOME` and `CODEX_HOME` directories for every invocation. Forward only the minimum authentication material supported by the installed Codex version into the temporary `CODEX_HOME`, with restrictive permissions; never preserve or link the real `CODEX_HOME` because it may contain ambient skills, plugins, configuration, or other instructions. Use the documented `--ignore-user-config` and `--ignore-rules` flags, stage only this agent's optional application skills under the capsule's `.agents/skills`, launch from the capsule with a read-only sandbox, and clean up authentication material and the capsule after output capture. The controlled Cloudflare Sandbox image must not contain Codex admin skills under `/etc/codex/skills`; adapter verification fails closed if it does. OpenAI-bundled system skills cannot be removed through the local skill scopes and are therefore an explicit trusted capability of the selected Codex binary, not part of the application agent registry.
 
 Both adapters give the model the agent prompt plus `input-manifest.json`. They do not inline `SKILL.md`. If the prompt explicitly names a bundled skill, the harness activates it using its native syntax; otherwise normal Agent Skills description matching applies. Implementation must prove the exact real Pi and Codex command contract, including the effective skill catalog, before an adapter is accepted.
 
@@ -299,7 +301,7 @@ Alternative considered: create new production skills during migration. Rejected 
 | Agent package changes after discovery | Recompute before launch and fail if its digest differs from the run manifest. |
 | Host artifact appears under `source/` | Fail workspace validation before starting agents. |
 | Invocation contains an unassigned host artifact | Fail capsule validation before starting that agent. |
-| Pi or Codex exposes an ambient or target skill | Treat adapter verification as failed and do not accept the run as valid evidence. |
+| Pi or Codex exposes a user, container-admin, or target skill | Treat adapter verification as failed and do not accept the run as valid evidence. |
 | Codex authentication cannot be forwarded without the real home | Fail the Codex adapter; do not fall back to exposing the real `CODEX_HOME`. |
 | Selected count exceeds concurrency | Queue excess reviewers; never silently omit them. |
 | One or more reviewers fail | Preserve Phase 2 partial-failure behavior and pass all records to the coordinator. |
@@ -310,7 +312,7 @@ Alternative considered: create new production skills during migration. Rejected 
 ## Risks / Trade-offs
 
 - **A private agent manifest is another contract to maintain.** → Keep it small, version it explicitly, and use Agent Skills only for the capability layer it actually standardizes.
-- **Harness Agent Skills behavior can drift between releases.** → Pin supported minimum versions, inspect effective catalogs with real installed Pi and Codex, and fail unsupported adapters explicitly.
+- **Harness Agent Skills behavior can drift between releases.** → Capability-probe the installed Pi and Codex command contracts, inspect effective catalogs with real harnesses, and fail unsupported adapters explicitly. Provider-bundled Codex system skills remain inside the trusted harness boundary.
 - **Minimal Codex authentication forwarding is version-sensitive.** → Isolate it behind the Codex adapter, test the supported auth source, apply restrictive permissions, and never copy configuration or skill roots.
 - **Separating source and artifacts changes workspace paths.** → Introduce explicit `source_dir` and `artifact_dir` properties, keep code locations repository-relative, and regression-test cleanup and retained-workspace behavior.
 - **Strict validation rejects skills a lenient client might accept.** → Built-in production agents are controlled source; require standards-valid packages and run `skills-ref` before merge.

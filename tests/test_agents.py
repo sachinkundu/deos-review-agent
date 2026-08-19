@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import review_bot.agents.runner as runner_module
 from review_bot.agents.registry import AgentSkill, package_digest
 from review_bot.agents.runner import (
     AgentResult,
@@ -196,6 +197,10 @@ def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
     real_codex_home = tmp_path / "real-codex"
     real_codex_home.mkdir()
     (real_codex_home / "auth.json").write_text('{"token":"not-printed"}')
+    ambient_skill = tmp_path / "real-home" / ".agents" / "skills" / "ambient"
+    ambient_skill.mkdir(parents=True)
+    (ambient_skill / "SKILL.md").write_text("FORBIDDEN_AMBIENT_SKILL")
+    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
     monkeypatch.setenv("CODEX_HOME", str(real_codex_home))
     monkeypatch.setenv("GITHUB_TOKEN", "must-not-forward")
     package = tmp_path / "package"
@@ -207,6 +212,9 @@ def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
     skill = AgentSkill("owned", skill_dir, "sha256:owned")
     capsule = tmp_path / "capsule"
     capsule.mkdir()
+    repository_skill = capsule / "repository" / ".agents" / "skills" / "target"
+    repository_skill.mkdir(parents=True)
+    (repository_skill / "SKILL.md").write_text("FORBIDDEN_TARGET_SKILL")
     captured: dict[str, object] = {}
 
     def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -239,7 +247,11 @@ def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
     assert "GITHUB_TOKEN" not in env
     assert captured["auth_mode"] == 0o600
     assert (Path(env["CODEX_HOME"]) / "auth.json").exists() is False  # cleaned on close
-    assert (capsule / ".agents" / "skills" / "owned" / "SKILL.md").is_file()
+    staged_root = capsule / ".agents" / "skills"
+    assert [path.name for path in staged_root.iterdir()] == ["owned"]
+    staged_text = (staged_root / "owned" / "SKILL.md").read_text()
+    assert "FORBIDDEN_AMBIENT_SKILL" not in staged_text
+    assert "FORBIDDEN_TARGET_SKILL" not in staged_text
 
 
 def test_pi_runner_command_builds():
@@ -325,7 +337,11 @@ def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
     assert "--name" not in commands[0]
     assert "--no-skills" in commands[0]
     assert "--no-extensions" in commands[0]
+    assert "--no-prompt-templates" in commands[0]
+    assert "--no-themes" in commands[0]
     assert "--no-context-files" in commands[0]
+    assert "--no-approve" in commands[0]
+    assert commands[0][commands[0].index("--tools") + 1] == "read,grep,find,ls"
     assert commands[0][-2:] == ["@shared-context.md", "@review-diff.diff"]
 
 
@@ -387,6 +403,91 @@ def test_verify_harness_command_rejects_unknown_and_missing_flags(monkeypatch):
     )
     with pytest.raises(HarnessError, match="lacks required"):
         verify_harness_command("codex", "codex")
+
+
+def test_verify_harness_command_rejects_codex_admin_skills(monkeypatch, tmp_path: Path):
+    admin_root = tmp_path / "etc-codex-skills"
+    admin_skill = admin_root / "admin"
+    admin_skill.mkdir(parents=True)
+    (admin_skill / "SKILL.md").write_text("admin instructions")
+    monkeypatch.setattr(runner_module, "CODEX_ADMIN_SKILLS_ROOT", admin_root)
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        output = (
+            "codex 1.0"
+            if "--version" in cmd
+            else "--ignore-user-config --ignore-rules --sandbox --ephemeral"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    with pytest.raises(HarnessError, match="admin skill scope must be empty"):
+        verify_harness_command("codex", "codex")
+
+
+def test_verify_harness_command_wraps_os_errors(monkeypatch):
+    monkeypatch.setattr(
+        "review_bot.agents.runner.subprocess.run",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(PermissionError("not executable")),
+    )
+    with pytest.raises(HarnessError, match="cannot inspect pi harness"):
+        verify_harness_command("pi", "pi")
+
+
+@pytest.mark.parametrize("runner_kind", ["codex", "pi"])
+def test_agent_runner_returns_failure_when_command_cannot_start(
+    monkeypatch, tmp_path: Path, runner_kind: str
+):
+    from review_bot.schema import load_schema
+
+    monkeypatch.setattr(
+        "review_bot.agents.runner.subprocess.run",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(PermissionError("not executable")),
+    )
+    runner: AgentRunner
+    if runner_kind == "codex":
+        runner = CodexAgentRunner(command="codex", schema=load_schema())
+    else:
+        runner = PiAgentRunner(command="pi")
+    try:
+        result = runner.run(AgentSpec("reviewer", "prompt", ()), tmp_path)
+    finally:
+        runner.close()
+
+    assert not result.ok
+    assert result.error is not None
+    assert "could not be started" in result.error
+
+
+@pytest.mark.parametrize("read_failure", ["unicode", "oserror"])
+def test_codex_runner_returns_failure_for_unreadable_output(
+    monkeypatch, tmp_path: Path, read_failure: str
+):
+    from review_bot.schema import load_schema
+
+    original_read_text = Path.read_text
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        output_path = Path(cmd[cmd.index("-o") + 1])
+        output_path.write_bytes(b"\xff" if read_failure == "unicode" else b"{}")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    def fake_read_text(path: Path, *args, **kwargs) -> str:
+        if read_failure == "oserror" and path.name == "reviewer.json":
+            raise OSError("unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    runner = CodexAgentRunner(command="codex", schema=load_schema())
+    try:
+        result = runner.run(AgentSpec("reviewer", "prompt", ()), tmp_path)
+    finally:
+        runner.close()
+
+    assert not result.ok
+    assert result.error is not None
+    assert "not readable JSON" in result.error
 
 
 def test_codex_runner_validates_output(tmp_path: Path):

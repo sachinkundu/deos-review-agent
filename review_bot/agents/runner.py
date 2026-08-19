@@ -24,6 +24,7 @@ from .registry import AgentSkill, package_digest
 
 DEFAULT_AGENT_TIMEOUT = 1800
 DEFAULT_MAX_CONCURRENCY = 4
+CODEX_ADMIN_SKILLS_ROOT = Path("/etc/codex/skills")
 
 
 class HarnessError(RuntimeError):
@@ -166,7 +167,7 @@ def verify_harness_command(command: str, harness: str) -> str:
     try:
         version = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=15)
         help_result = subprocess.run(help_cmd, capture_output=True, text=True, timeout=15)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise HarnessError(f"cannot inspect {harness} harness {command!r}: {exc}") from exc
     if version.returncode != 0 or help_result.returncode != 0:
         raise HarnessError(f"cannot inspect {harness} harness {command!r}")
@@ -181,7 +182,24 @@ def verify_harness_command(command: str, harness: str) -> str:
         raise HarnessError(
             f"{harness} harness {command!r} lacks required isolation flags: {missing}"
         )
+    if harness == "codex":
+        _verify_codex_admin_skills_absent()
     return (version.stdout or version.stderr).strip()
+
+
+def _verify_codex_admin_skills_absent() -> None:
+    """Reject machine-level skills outside the per-agent invocation capsule."""
+    try:
+        admin_skills = sorted(CODEX_ADMIN_SKILLS_ROOT.rglob("SKILL.md"))
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect Codex admin skill scope {CODEX_ADMIN_SKILLS_ROOT}: {exc}"
+        ) from exc
+    if admin_skills:
+        raise HarnessError(
+            "Codex admin skill scope must be empty for isolated review runs: "
+            f"{CODEX_ADMIN_SKILLS_ROOT}"
+        )
 
 
 class CodexAgentRunner(AgentRunner):
@@ -272,13 +290,13 @@ class CodexAgentRunner(AgentRunner):
                 error=f"agent timed out after {self.timeout}s",
                 duration_seconds=time.monotonic() - started,
             )
-        except FileNotFoundError as e:
+        except OSError as e:
             return AgentResult(
                 name=spec.name,
                 contract_version=spec.contract_version,
                 package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent command not found: {self.command!r} ({e})",
+                error=f"agent command could not be started: {self.command!r} ({e})",
                 duration_seconds=time.monotonic() - started,
             )
 
@@ -305,13 +323,13 @@ class CodexAgentRunner(AgentRunner):
 
         try:
             data = json.loads(out_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeError, OSError) as e:
             return AgentResult(
                 name=spec.name,
                 contract_version=spec.contract_version,
                 package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent output is not valid JSON: {e}",
+                error=f"agent output is not readable JSON: {e}",
                 duration_seconds=time.monotonic() - started,
             )
 
@@ -416,13 +434,13 @@ class PiAgentRunner(AgentRunner):
                 error=f"agent timed out after {self.timeout}s",
                 duration_seconds=time.monotonic() - started,
             )
-        except FileNotFoundError as e:
+        except OSError as e:
             return AgentResult(
                 name=spec.name,
                 contract_version=spec.contract_version,
                 package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent command not found: {self.command!r} ({e})",
+                error=f"agent command could not be started: {self.command!r} ({e})",
                 duration_seconds=time.monotonic() - started,
             )
 

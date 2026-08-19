@@ -11,6 +11,9 @@ three proof levels are intentionally separate.
   same cases.
 - Both proofs require every assigned reference marker and reject markers from an
   ambient home skill or a pull-request-owned skill.
+- These proofs cover untrusted local skill scopes. Codex provider-bundled system
+  skills are part of the trusted harness binary, while container-admin skills
+  are rejected by adapter verification before a review run starts.
 
 ## Local proof against a real pull request
 
