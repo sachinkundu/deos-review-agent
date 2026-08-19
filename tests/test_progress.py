@@ -158,6 +158,14 @@ def test_rich_live_elapsed_advances_only_from_monotonic_time(monkeypatch):
             )
             == 12.0
         )
+        assert renderer._pipeline_status(  # type: ignore[reportPrivateUsage]
+            {"phase": "cleanup", "state": "running"},
+            {"phase": "posting", "state": "succeeded"},
+        ) == ("cleanup", "running")
+        assert renderer._pipeline_status(  # type: ignore[reportPrivateUsage]
+            {"phase": "cleanup", "state": "running"},
+            {"phase": "reviewers", "state": "interrupted"},
+        ) == ("reviewers", "interrupted")
     finally:
         renderer.close()
 
@@ -347,3 +355,33 @@ def test_renderer_and_store_failures_do_not_change_control_flow(tmp_path: Path):
     controller.phase(Phase.REGISTRY, State.SUCCEEDED, "registry succeeded")
     controller.finish(0)
     controller.close()
+
+
+def test_snapshot_store_failure_emits_one_safe_json_diagnostic():
+    class BrokenStore:
+        def write(self, snapshot):
+            raise OSError("secret disk detail")
+
+    stream = io.StringIO()
+    controller = _controller("json", stream, Clock())
+    controller._store = BrokenStore()  # type: ignore[reportPrivateUsage]
+    controller._bound = {  # type: ignore[reportPrivateUsage]
+        "repository": "owner/repo",
+        "pull_request": 7,
+        "head_sha": "abc",
+        "mode": "dry-run",
+        "harness": "pi",
+        "max_concurrency": 1,
+    }
+    controller.phase(Phase.REGISTRY, State.RUNNING, "registry running")
+    controller.phase(Phase.REGISTRY, State.SUCCEEDED, "registry succeeded")
+    controller.finish(0)
+    controller.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    diagnostics = [
+        event for event in events if event["message"] == "progress snapshot persistence disabled"
+    ]
+    assert len(diagnostics) == 1
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
+    assert "secret disk detail" not in stream.getvalue()

@@ -117,12 +117,21 @@ class WorkItem:
 class ProgressRenderer(Protocol):
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None: ...
 
+    def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None: ...
+
     def close(self) -> None: ...
 
 
 class NullProgressRenderer:
+    def __init__(self, stream: IO[str]):
+        self.stream = stream
+
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
         return
+
+    def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        self.stream.write(f"warning: {event['message']}\n")
+        self.stream.flush()
 
     def close(self) -> None:
         return
@@ -156,6 +165,9 @@ class PlainProgressRenderer:
         )
         self.stream.flush()
 
+    def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        self.render(event, snapshot)
+
     def close(self) -> None:
         return
 
@@ -167,6 +179,9 @@ class JsonProgressRenderer:
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
         self.stream.write(json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n")
         self.stream.flush()
+
+    def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        self.render(event, snapshot)
 
     def close(self) -> None:
         return
@@ -240,6 +255,14 @@ class RichProgressRenderer:
             elapsed += max(0.0, self._monotonic_clock() - self._snapshot_monotonic)
         return elapsed
 
+    @staticmethod
+    def _pipeline_status(event: dict[str, Any], overall: dict[str, Any]) -> tuple[str, str]:
+        phase = str(overall["phase"])
+        state = str(overall["state"])
+        if event.get("phase") == Phase.CLEANUP.value and state != State.INTERRUPTED.value:
+            return Phase.CLEANUP.value, str(event["state"])
+        return phase, state
+
     def build_table(self) -> Table:
         with self._lock:
             event = dict(self._event or {})
@@ -252,9 +275,9 @@ class RichProgressRenderer:
         if snapshot:
             overall = snapshot["overall"]
             assert isinstance(overall, dict)
-            state = str(overall["state"])
+            phase, state = self._pipeline_status(event, overall)
             table.add_row(
-                str(overall["phase"]),
+                phase,
                 Text(state, style=self._STYLES.get(state, "")),
                 f"{self._live_pipeline_elapsed(event, state):.1f}s",
                 "—",
@@ -282,6 +305,10 @@ class RichProgressRenderer:
             )
         return table
 
+    def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
+        with self._lock:
+            self._console.print(Text(str(event["message"]), style="bold yellow"))
+
     def close(self) -> None:
         with self._lock:
             if self._started:
@@ -295,7 +322,7 @@ def create_renderer(mode: str, stream: IO[str] | None = None) -> ProgressRendere
     if mode == "auto":
         selected = "rich" if output.isatty() else "plain"
     if selected == "off":
-        return NullProgressRenderer()
+        return NullProgressRenderer(output)
     if selected == "plain":
         return PlainProgressRenderer(output)
     if selected == "json":
@@ -486,15 +513,25 @@ class ProgressController:
                 timeout_seconds=timeout_seconds,
             )
             snapshot = self._snapshot(wall_now, mono_now)
+            observer_event: dict[str, Any] | None = None
             if self._store is not None and self._store_healthy and snapshot is not None:
                 try:
                     self._store.write(snapshot)
                 except (OSError, ProgressError):
                     self._store_healthy = False
+                    observer_event = self._event(
+                        phase,
+                        state,
+                        "progress snapshot persistence disabled",
+                        wall_now,
+                        mono_now,
+                    )
             if self._renderer_healthy:
                 try:
                     self._renderer.render(event, snapshot)
-                except (OSError, RuntimeError, ValueError):
+                    if observer_event is not None:
+                        self._renderer.diagnostic(observer_event, snapshot)
+                except (AttributeError, OSError, RuntimeError, ValueError):
                     self._renderer_healthy = False
                     with suppress(Exception):  # pragma: no cover - best-effort restoration
                         self._renderer.close()

@@ -398,13 +398,13 @@ def _run_review_pipeline(
     progress.phase(Phase.PR_METADATA, State.RUNNING, "pull request metadata loading")
     try:
         pr = client.fetch_pr(owner, repo, number, token)
+        bot_username = creds.bot_username or client.bot_username()
     except GitHubError as e:
         progress.phase(Phase.PR_METADATA, State.FAILED, "pull request metadata unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
     progress.phase(Phase.PR_METADATA, State.SUCCEEDED, "pull request metadata loaded")
 
-    bot_username = creds.bot_username or client.bot_username()
     if pr.sender_login == bot_username:
         _skip_phases(
             progress,

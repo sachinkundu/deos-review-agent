@@ -203,6 +203,34 @@ def test_run_review_bot_skip(tmp_path: Path, capsys):
     assert events[-1]["message"] == "run finished"
 
 
+def test_bot_identity_failure_stays_in_pr_metadata_phase(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.delenv("GITHUB_APP_BOT_USERNAME")
+
+    class IdentityFailureClient(FakeGitHubClient):
+        def bot_username(self) -> str:
+            raise GitHubError("identity lookup unavailable")
+
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=lambda creds: IdentityFailureClient(creds, _make_pr(), "", []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    metadata_states = [event["state"] for event in events if event["phase"] == "pr-metadata"]
+    assert metadata_states == ["running", "failed", "failed"]
+    assert not workspace.workdir.exists()
+
+
 def test_run_review_dry_run_does_not_post(tmp_path: Path, sample_diff):
     pr = _make_pr()
     posted = []
