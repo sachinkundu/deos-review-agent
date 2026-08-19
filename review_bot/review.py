@@ -284,11 +284,6 @@ def _review_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _finish(progress: ProgressController, exit_code: int) -> int:
-    progress.finish(exit_code)
-    return exit_code
-
-
 def _skip_phases(
     progress: ProgressController,
     phases: tuple[Phase, ...],
@@ -313,7 +308,7 @@ def run_review(
     try:
         with diagnostics:
             try:
-                return _run_review_pipeline(
+                exit_code = _run_review_pipeline(
                     args,
                     progress,
                     client_factory=client_factory,
@@ -321,6 +316,8 @@ def run_review(
                     workspace_factory=workspace_factory,
                     diff_artifact_writer=diff_artifact_writer,
                 )
+                progress.finish(exit_code)
+                return exit_code
             except KeyboardInterrupt:
                 progress.interrupt()
                 if args.progress == "json":
@@ -352,7 +349,7 @@ def _run_review_pipeline(
         owner, repo, number = parse_pr_url(args.pr_url)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
 
     progress.phase(Phase.REGISTRY, State.RUNNING, "agent registry discovery running")
     try:
@@ -360,7 +357,7 @@ def _run_review_pipeline(
     except RegistryError as e:
         progress.phase(Phase.REGISTRY, State.FAILED, "agent registry invalid")
         print(f"error: agent registry invalid: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     progress.phase(Phase.REGISTRY, State.SUCCEEDED, "agent registry discovered")
 
     progress.phase(Phase.CREDENTIALS, State.RUNNING, "provider credentials loading")
@@ -369,18 +366,18 @@ def _run_review_pipeline(
     except CredentialsError as e:
         progress.phase(Phase.CREDENTIALS, State.FAILED, "provider credentials unavailable")
         print(f"error: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
 
     client = client_factory(creds)
     opts = RunOptions(args)
     if opts.max_agent_concurrency < 1:
         progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
         print("error: max agent concurrency must be at least 1", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     if opts.agent_timeout < 0:
         progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
         print("error: agent timeout must be non-negative", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     workspace = workspace_factory(
         opts.workspace_root, owner, repo, number, bootstrap_timeout=opts.bootstrap_timeout
     )
@@ -392,7 +389,7 @@ def _run_review_pipeline(
     except (CredentialsError, GitHubError) as e:
         progress.phase(Phase.CREDENTIALS, State.FAILED, "provider authentication failed")
         print(f"error: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     progress.phase(Phase.CREDENTIALS, State.SUCCEEDED, "provider authentication succeeded")
 
     progress.phase(Phase.PR_METADATA, State.RUNNING, "pull request metadata loading")
@@ -401,7 +398,7 @@ def _run_review_pipeline(
     except GitHubError as e:
         progress.phase(Phase.PR_METADATA, State.FAILED, "pull request metadata unavailable")
         print(f"error: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     progress.phase(Phase.PR_METADATA, State.SUCCEEDED, "pull request metadata loaded")
 
     bot_username = creds.bot_username or client.bot_username()
@@ -419,6 +416,7 @@ def _run_review_pipeline(
                 Phase.HEAD_FRESHNESS,
                 Phase.PAYLOAD,
                 Phase.POSTING,
+                Phase.CLEANUP,
             ),
             "bot-authored pull request ignored",
         )
@@ -426,7 +424,7 @@ def _run_review_pipeline(
             f"skip: PR {pr.number} was opened by the bot ({bot_username}); "
             "not reviewing our own PRs."
         )
-        return _finish(progress, 0)
+        return 0
 
     progress.phase(Phase.PROVIDER_DIFF, State.RUNNING, "provider diff loading")
     try:
@@ -434,7 +432,7 @@ def _run_review_pipeline(
     except GitHubError as e:
         progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff unavailable")
         print(f"error: {e}", file=sys.stderr)
-        return _finish(progress, 1)
+        return 1
     progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "provider diff loaded")
 
     progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
@@ -443,7 +441,7 @@ def _run_review_pipeline(
     except WorkspaceError as e:
         progress.phase(Phase.WORKSPACE, State.FAILED, "exact-head workspace setup failed")
         print(f"error: workspace setup failed: {e}", file=sys.stderr)
-        return _finish(progress, 2)
+        return 2
     progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
     progress.bind_workspace(
         workspace.artifact_dir,
@@ -472,7 +470,7 @@ def _run_review_pipeline(
             bootstrap_state = State.TIMED_OUT if bootstrap.exit_code is None else State.FAILED
             progress.phase(Phase.BOOTSTRAP, bootstrap_state, "repository bootstrap failed")
             print(f"error: bootstrap failed: {bootstrap.summary}", file=sys.stderr)
-            return _finish(progress, 2)
+            return 2
         progress.phase(
             Phase.BOOTSTRAP,
             State.SUCCEEDED if bootstrap.ran else State.SKIPPED,
@@ -492,7 +490,7 @@ def _run_review_pipeline(
         except DiffFilterError as e:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
             print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
-            return _finish(progress, 2)
+            return 2
         write_shared_context(workspace.artifact_dir, pr, bootstrap)
         progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "diff artifacts ready")
 
@@ -509,7 +507,7 @@ def _run_review_pipeline(
         except (HarnessError, ResourceError) as e:
             progress.phase(Phase.REGISTRY, State.FAILED, "review harness setup failed")
             print(f"error: review harness setup failed: {e}", file=sys.stderr)
-            return _finish(progress, 2)
+            return 2
         progress.phase(Phase.REGISTRY, State.SUCCEEDED, "review harness setup succeeded")
 
         harness = Path(opts.agent_command).name
@@ -556,7 +554,7 @@ def _run_review_pipeline(
             except CoordinatorError as e:
                 progress.phase(Phase.REVIEWERS, State.FAILED, "reviewer identity validation failed")
                 print(f"error: {e}", file=sys.stderr)
-                return _finish(progress, 4)
+                return 4
 
             failures = [r for r in agent_results if not r.ok]
             successful = [r for r in agent_results if r.ok]
@@ -581,7 +579,7 @@ def _run_review_pipeline(
                     "error: all review agents failed; nothing to review, no review posted.",
                     file=sys.stderr,
                 )
-                return _finish(progress, 3)
+                return 3
             progress.phase(
                 Phase.REVIEWERS,
                 State.SUCCEEDED,
@@ -607,11 +605,11 @@ def _run_review_pipeline(
             except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
                 progress.coordinator_settled(ok=False, timed_out="timed out" in str(e).lower())
                 print(f"error: {e}", file=sys.stderr)
-                return _finish(progress, 4)
+                return 4
         except (HarnessError, ResourceError, RegistryError) as e:
             progress.phase(Phase.REVIEWERS, State.FAILED, "isolated reviewer invocation failed")
             print(f"error: isolated agent invocation failed: {e}", file=sys.stderr)
-            return _finish(progress, 2)
+            return 2
         finally:
             resolver.close()
             if hasattr(runner, "close"):
@@ -624,7 +622,7 @@ def _run_review_pipeline(
         except SchemaError as e:
             progress.phase(Phase.SCHEMA_VALIDATION, State.FAILED, "review schema invalid")
             print(f"error: {e}", file=sys.stderr)
-            return _finish(progress, 7)
+            return 7
         progress.phase(Phase.SCHEMA_VALIDATION, State.SUCCEEDED, "review schema valid")
 
         progress.phase(Phase.DIFF_VALIDATION, State.RUNNING, "diff line validation running")
@@ -638,7 +636,7 @@ def _run_review_pipeline(
         except GitHubError as e:
             progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head recheck failed")
             print(f"error: head re-check failed: {e}", file=sys.stderr)
-            return _finish(progress, 6)
+            return 6
         if fresh.head_sha != pr.head_sha:
             progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head changed")
             print(
@@ -646,7 +644,7 @@ def _run_review_pipeline(
                 "refuse to post against a stale head. Re-run the review.",
                 file=sys.stderr,
             )
-            return _finish(progress, 5)
+            return 5
         progress.phase(Phase.HEAD_FRESHNESS, State.SUCCEEDED, "pull request head unchanged")
 
         progress.phase(Phase.PAYLOAD, State.RUNNING, "review payload retention running")
@@ -670,7 +668,7 @@ def _run_review_pipeline(
             progress.phase(Phase.POSTING, State.SKIPPED, "dry run does not post")
             print("dry-run: final review payload (not posted):")
             print(json.dumps(payload, indent=2, ensure_ascii=False))
-            return _finish(progress, 0)
+            return 0
 
         progress.phase(Phase.POSTING, State.RUNNING, "provider review posting running")
         try:
@@ -680,12 +678,12 @@ def _run_review_pipeline(
         except GitHubError as e:
             progress.phase(Phase.POSTING, State.FAILED, "provider review posting failed")
             print(f"error: {e}", file=sys.stderr)
-            return _finish(progress, 6)
+            return 6
         progress.set_review_url(posted.get("html_url"))
         progress.phase(Phase.POSTING, State.SUCCEEDED, "provider review accepted")
         print(f"posted review {posted.get('id')} ({posted.get('state')}) on {args.pr_url}")
         print(f"review URL: {posted.get('html_url')}")
-        return _finish(progress, 0)
+        return 0
     finally:
         if opts.keep_workspace:
             progress.phase(

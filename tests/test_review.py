@@ -178,11 +178,17 @@ def test_run_review_happy_path(tmp_path: Path, sample_diff):
     assert posted[0]["comments"][0]["line"] == 9
 
 
-def test_run_review_bot_skip(tmp_path: Path):
+def test_run_review_bot_skip(tmp_path: Path, capsys):
     pr = _make_pr(sender_login="review-bot[bot]")
     posted = []
     exit_code = run_review(
-        ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
         client_factory=_make_client_factory(pr, "", posted),
         runner_factory=_make_runner_factory(make_review(findings=[])),
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
@@ -192,6 +198,9 @@ def test_run_review_bot_skip(tmp_path: Path):
     )
     assert exit_code == 0
     assert posted == []
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert any(event["phase"] == "cleanup" and event["state"] == "skipped" for event in events)
+    assert events[-1]["message"] == "run finished"
 
 
 def test_run_review_dry_run_does_not_post(tmp_path: Path, sample_diff):
@@ -487,7 +496,7 @@ def test_run_review_artifact_failure_stops_before_agents(tmp_path: Path, sample_
 
 @pytest.mark.parametrize(("keep", "removed"), [(False, True), (True, False)])
 def test_run_review_workspace_cleanup_and_artifact_retention(
-    tmp_path: Path, sample_diff, keep: bool, removed: bool
+    tmp_path: Path, sample_diff, keep: bool, removed: bool, capsys
 ):
     pr = _make_pr()
     posted: list[dict] = []
@@ -495,6 +504,8 @@ def test_run_review_workspace_cleanup_and_artifact_retention(
     args = [
         "https://github.com/owner/repo/pull/7",
         "--dry-run",
+        "--progress",
+        "json",
         "--workspace-root",
         str(tmp_path),
     ]
@@ -510,6 +521,9 @@ def test_run_review_workspace_cleanup_and_artifact_retention(
     )
 
     assert exit_code == 0
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert events[-2]["phase"] == "cleanup"
+    assert events[-1]["message"] == "run finished"
     assert workspace.removed is removed
     assert (workspace.artifact_dir / "provider-diff.diff").read_text() == sample_diff
     assert (workspace.artifact_dir / "diff-filter.json").exists()
@@ -638,6 +652,7 @@ def test_bot_skip_reports_every_inapplicable_phase(tmp_path: Path, capsys):
         "head-freshness",
         "payload",
         "posting",
+        "cleanup",
     }
 
 
