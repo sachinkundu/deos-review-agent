@@ -255,6 +255,45 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
     assert not second_started.is_set()
 
 
+def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
+    second_started = threading.Event()
+    release_second = threading.Event()
+    captured: list[BaseException] = []
+
+    class ExceptionalRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                assert second_started.wait(timeout=2)
+                raise OSError("disk unavailable")
+            second_started.set()
+            assert release_second.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def run() -> None:
+        try:
+            run_agents_concurrently(
+                ExceptionalRunner(),
+                [
+                    (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+                    (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+                ],
+                max_concurrency=2,
+            )
+        except BaseException as exc:
+            captured.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert second_started.wait(timeout=2)
+    time.sleep(0.05)
+    assert thread.is_alive()
+    release_second.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert len(captured) == 1
+    assert isinstance(captured[0], OSError)
+
+
 def test_progress_callback_failures_do_not_change_agent_results():
     runner = FakeAgentRunner(
         {

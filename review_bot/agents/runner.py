@@ -161,7 +161,7 @@ def run_agents_concurrently(
 
     results: list[AgentResult | None] = [None] * len(invocations)
     pool = ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency))
-    interrupted = False
+    needs_shutdown = True
     futures: dict[Future[AgentResult], int] = {}
     try:
         futures = {
@@ -171,14 +171,20 @@ def run_agents_concurrently(
             result = future.result()
             results[futures[future]] = result
             _notify(on_settled, result)
-    except BaseException:
-        interrupted = True
+    except KeyboardInterrupt:
         for future in futures:
             future.cancel()
         pool.shutdown(wait=False, cancel_futures=True)
+        needs_shutdown = False
+        raise
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        needs_shutdown = False
         raise
     finally:
-        if not interrupted:
+        if needs_shutdown:
             pool.shutdown(wait=True)
     return [result for result in results if result is not None]
 

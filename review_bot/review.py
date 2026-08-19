@@ -289,9 +289,15 @@ def _finish(progress: ProgressController, exit_code: int) -> int:
     return exit_code
 
 
-def _skip_phases(progress: ProgressController, phases: tuple[Phase, ...], message: str) -> None:
+def _skip_phases(
+    progress: ProgressController,
+    phases: tuple[Phase, ...],
+    message: str,
+    *,
+    update_overall: bool = True,
+) -> None:
     for phase in phases:
-        progress.phase(phase, State.SKIPPED, message)
+        progress.phase(phase, State.SKIPPED, message, update_overall=update_overall)
 
 
 def run_review(
@@ -316,6 +322,9 @@ def run_review(
             )
     except KeyboardInterrupt:
         progress.interrupt()
+        raise
+    except Exception:
+        progress.finish(1)
         raise
     finally:
         progress.close()
@@ -553,6 +562,7 @@ def _run_review_pipeline(
                         Phase.POSTING,
                     ),
                     "no successful reviewer result",
+                    update_overall=False,
                 )
                 print(
                     "error: all review agents failed; nothing to review, no review posted.",

@@ -10,7 +10,7 @@ import pytest
 
 from review_bot.agents.registry import AgentRegistry, discover_agent_registry, load_agent_package
 from review_bot.diff_filter import DiffFilterError
-from review_bot.github import Credentials, GitHubAppClient, PRInfo
+from review_bot.github import Credentials, GitHubAppClient, GitHubError, PRInfo
 from review_bot.review import build_review_body, run_review, run_status
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
@@ -70,7 +70,11 @@ class FakeGitHubClient(GitHubAppClient):
         self.posted.append(
             {"event": event, "body": body, "comments": comments, "commit_id": commit_id}
         )
-        return {"id": 99, "state": event}
+        return {
+            "id": 99,
+            "state": event,
+            "html_url": "https://github.com/owner/repo/pull/7#pullrequestreview-99",
+        }
 
 
 class FakeWorkspace(PRWorkspace):
@@ -211,6 +215,29 @@ def test_run_review_dry_run_does_not_post(tmp_path: Path, sample_diff):
     )
     assert exit_code == 0
     assert posted == []
+
+
+def test_retained_post_success_records_provider_review_url(tmp_path: Path, sample_diff):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 0
+    assert snapshot["overall"] == {"phase": "posting", "state": "succeeded"}
+    assert snapshot["review_url"] == ("https://github.com/owner/repo/pull/7#pullrequestreview-99")
 
 
 def test_run_review_agent_failure_surfaces_in_summary(tmp_path: Path, sample_diff):
@@ -620,9 +647,114 @@ def test_all_reviewer_failures_are_retained_and_later_phases_skipped(tmp_path: P
     assert [item["state"] for item in snapshot["reviewers"]] == ["failed"] * 4
     assert all(item["error_summary"] == "reviewer failed" for item in snapshot["reviewers"])
     assert snapshot["coordinator"]["state"] == "skipped"
-    assert snapshot["overall"]["state"] == "failed"
+    assert snapshot["overall"] == {"phase": "reviewers", "state": "failed"}
     assert "model secret" not in snapshot_text
     assert snapshot["final_exit_code"] == 3
+
+
+def test_unexpected_exception_finalizes_retained_progress(tmp_path: Path, sample_diff):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    def broken_writer(workdir: Path, diff_text: str):
+        raise OSError("disk unavailable")
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                "--keep-workspace",
+                "--progress",
+                "off",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+            workspace_factory=lambda *args, **kwargs: workspace,
+            diff_artifact_writer=broken_writer,
+        )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert snapshot["overall"] == {"phase": "provider-diff", "state": "failed"}
+    assert snapshot["finished_at"] is not None
+    assert snapshot["final_exit_code"] == 1
+
+
+def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff):
+    valid = make_review(findings=[], overall_correctness="patch is correct")
+    invalid = dict(valid)
+    invalid.pop("overall_confidence_score")
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    runner = FakeAgentRunner(
+        {
+            "correctness": valid,
+            "api-reality": valid,
+            "tests": valid,
+            "safety": valid,
+            "coordinator": invalid,
+        }
+    )
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 7
+    assert snapshot["overall"] == {"phase": "schema-validation", "state": "failed"}
+    assert snapshot["final_exit_code"] == 7
+
+
+@pytest.mark.parametrize("failure_phase", ["head-freshness", "posting"])
+def test_provider_failure_finalizes_retained_progress(
+    tmp_path: Path, sample_diff, failure_phase: str
+):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    class FailingClient(FakeGitHubClient):
+        def __init__(self, creds, pr, diff, posted):
+            super().__init__(creds, pr, diff, posted)
+            self.fetch_count = 0
+
+        def fetch_pr(self, owner, repo, number, token=None):
+            self.fetch_count += 1
+            if failure_phase == "head-freshness" and self.fetch_count == 2:
+                raise GitHubError("head read failed")
+            return self.pr
+
+        def post_review(self, owner, repo, number, commit_id, event, body, comments, token=None):
+            if failure_phase == "posting":
+                raise GitHubError("post failed")
+            return super().post_review(owner, repo, number, commit_id, event, body, comments, token)
+
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=lambda creds: FailingClient(creds, _make_pr(), sample_diff, []),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 6
+    assert snapshot["overall"] == {"phase": failure_phase, "state": "failed"}
+    assert snapshot["final_exit_code"] == 6
 
 
 def test_reviewer_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff):
