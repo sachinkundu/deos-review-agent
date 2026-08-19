@@ -168,9 +168,8 @@ class AgentRunner:
 
 
 def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
-    active = [process for process in processes if process.poll() is None]
     if os.name == "posix":
-        process_groups = [process.pid for process in active]
+        process_groups = [process.pid for process in processes]
         for process_group in process_groups:
             try:
                 os.killpg(process_group, signal.SIGTERM)
@@ -198,6 +197,7 @@ def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
                 continue
         return
 
+    active = [process for process in processes if process.poll() is None]
     for process in active:
         try:
             process.terminate()  # pragma: no cover - Windows fallback

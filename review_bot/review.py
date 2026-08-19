@@ -530,6 +530,7 @@ def _run_review_pipeline(
         harness = Path(opts.agent_command).name
         resolver = ResourceResolver(workspace.source_dir, workspace.artifact_dir)
         try:
+            progress.phase(Phase.REVIEWERS, State.RUNNING, "reviewer preparation running")
             write_registry_artifacts(workspace.artifact_dir, registry, harness)
             invocations: list[tuple[AgentSpec, Path]] = []
             for agent in registry.reviewers:
@@ -548,7 +549,6 @@ def _run_review_pipeline(
                         capsule.root,
                     )
                 )
-            progress.phase(Phase.REVIEWERS, State.RUNNING, "reviewer roster running")
             agent_results = run_agents_concurrently(
                 runner,
                 invocations,

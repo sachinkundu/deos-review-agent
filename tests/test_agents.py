@@ -346,7 +346,7 @@ def test_posix_termination_kills_group_after_leader_exits(monkeypatch):
         pid = 4321
 
         def poll(self):
-            return None
+            return 0
 
     signals: list[tuple[int, int]] = []
     monotonic = iter((0.0, 2.0))

@@ -861,6 +861,39 @@ def test_interrupt_during_workspace_binding_still_cleans_workspace(
     assert workspace.removed is True
 
 
+def test_capsule_failure_has_running_then_failed_reviewer_progress(
+    tmp_path: Path, sample_diff, monkeypatch, capsys
+):
+    from review_bot.resources import ResourceError
+
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    def fail_capsule(*args, **kwargs):
+        raise ResourceError("copy failed")
+
+    monkeypatch.setattr("review_bot.review.ResourceResolver.create_capsule", fail_capsule)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert exit_code == 2
+    reviewer_states = [event["state"] for event in events if event["phase"] == "reviewers"]
+    assert reviewer_states[0] == "running"
+    assert reviewer_states[1:] == ["failed", "failed"]
+
+
 def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff):
     valid = make_review(findings=[], overall_correctness="patch is correct")
     invalid = dict(valid)
