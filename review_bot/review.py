@@ -452,28 +452,28 @@ def _run_review_pipeline(
         return 1
     progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "provider diff loaded")
 
-    progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
     try:
-        workspace.setup(pr.head_repo_clone_url, pr.head_sha, pr.head_ref, token)
-    except WorkspaceError as e:
-        progress.phase(Phase.WORKSPACE, State.FAILED, "exact-head workspace setup failed")
-        print(f"error: workspace setup failed: {e}", file=sys.stderr)
-        return 2
-    progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
-    progress.bind_workspace(
-        workspace.artifact_dir,
-        repository=f"{owner}/{repo}",
-        pull_request=number,
-        head_sha=pr.head_sha,
-        dry_run=opts.dry_run,
-        harness=Path(opts.agent_command).name,
-        max_concurrency=opts.max_agent_concurrency,
-        reviewer_names=[agent.name for agent in registry.reviewers],
-        coordinator_name=registry.coordinator.name,
-        timeout_seconds=opts.agent_timeout,
-    )
+        progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
+        try:
+            workspace.setup(pr.head_repo_clone_url, pr.head_sha, pr.head_ref, token)
+        except WorkspaceError as e:
+            progress.phase(Phase.WORKSPACE, State.FAILED, "exact-head workspace setup failed")
+            print(f"error: workspace setup failed: {e}", file=sys.stderr)
+            return 2
+        progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
+        progress.bind_workspace(
+            workspace.artifact_dir,
+            repository=f"{owner}/{repo}",
+            pull_request=number,
+            head_sha=pr.head_sha,
+            dry_run=opts.dry_run,
+            harness=Path(opts.agent_command).name,
+            max_concurrency=opts.max_agent_concurrency,
+            reviewer_names=[agent.name for agent in registry.reviewers],
+            coordinator_name=registry.coordinator.name,
+            timeout_seconds=opts.agent_timeout,
+        )
 
-    try:
         progress.phase(Phase.BOOTSTRAP, State.RUNNING, "repository bootstrap running")
         bootstrap = workspace.run_bootstrap(
             workspace.source_dir,
@@ -666,10 +666,22 @@ def _run_review_pipeline(
             fresh = client.fetch_pr(owner, repo, number, token)
         except GitHubError as e:
             progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head recheck failed")
+            _skip_phases(
+                progress,
+                (Phase.PAYLOAD, Phase.POSTING),
+                "head freshness unavailable",
+                update_overall=False,
+            )
             print(f"error: head re-check failed: {e}", file=sys.stderr)
             return 6
         if fresh.head_sha != pr.head_sha:
             progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head changed")
+            _skip_phases(
+                progress,
+                (Phase.PAYLOAD, Phase.POSTING),
+                "pull request head changed",
+                update_overall=False,
+            )
             print(
                 f"error: PR head changed from {pr.head_sha} to {fresh.head_sha} before posting; "
                 "refuse to post against a stale head. Re-run the review.",

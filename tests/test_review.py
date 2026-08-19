@@ -835,6 +835,32 @@ def test_json_unexpected_exception_keeps_stderr_jsonl(tmp_path: Path, sample_dif
     assert "Traceback" not in captured.err
 
 
+def test_interrupt_during_workspace_binding_still_cleans_workspace(
+    tmp_path: Path, sample_diff, monkeypatch
+):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    def interrupt_binding(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("review_bot.review.ProgressController.bind_workspace", interrupt_binding)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    assert exit_code == 130
+    assert workspace.removed is True
+
+
 def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff):
     valid = make_review(findings=[], overall_correctness="patch is correct")
     invalid = dict(valid)
@@ -872,7 +898,7 @@ def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff)
 
 @pytest.mark.parametrize("failure_phase", ["head-freshness", "posting"])
 def test_provider_failure_finalizes_retained_progress(
-    tmp_path: Path, sample_diff, failure_phase: str
+    tmp_path: Path, sample_diff, failure_phase: str, capsys
 ):
     workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
 
@@ -897,7 +923,7 @@ def test_provider_failure_finalizes_retained_progress(
             "https://github.com/owner/repo/pull/7",
             "--keep-workspace",
             "--progress",
-            "off",
+            "json",
             "--workspace-root",
             str(tmp_path),
         ],
@@ -911,6 +937,13 @@ def test_provider_failure_finalizes_retained_progress(
     assert exit_code == 6
     assert snapshot["overall"] == {"phase": failure_phase, "state": "failed"}
     assert snapshot["final_exit_code"] == 6
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    if failure_phase == "head-freshness":
+        assert [
+            (event["phase"], event["state"])
+            for event in events
+            if event["phase"] in {"payload", "posting"}
+        ] == [("payload", "skipped"), ("posting", "skipped")]
 
 
 def test_reviewer_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff):
