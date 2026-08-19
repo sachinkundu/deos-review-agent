@@ -5,15 +5,15 @@ Give operators truthful live and retained visibility into long-running review ru
 ## ADDED Requirements
 
 ### Requirement: Select the progress presentation
-The system SHALL accept `--progress auto|plain|json|off` for review runs and SHALL default to `auto`. `auto` SHALL use a live terminal presentation when the progress output destination is an interactive terminal and SHALL otherwise emit newline-delimited plain progress events. An unsupported progress value MUST fail as a usage error before GitHub authentication or model execution begins.
+The system SHALL accept `--progress auto|plain|json|off` for review runs and SHALL default to `auto`. All new review-run progress output SHALL be written to standard error so existing final output on standard output remains compatible. `auto` SHALL use a live terminal presentation when standard error is an interactive terminal and SHALL otherwise emit newline-delimited plain progress events to standard error. An unsupported progress value MUST fail as a usage error before GitHub authentication or model execution begins.
 
 #### Scenario: Interactive automatic mode
-- **WHEN** an operator starts a review with the default progress mode and the progress output destination is an interactive terminal
-- **THEN** the system displays a live terminal presentation
+- **WHEN** an operator starts a review with the default progress mode and standard error is an interactive terminal
+- **THEN** the system displays a live terminal presentation on standard error
 
 #### Scenario: Redirected automatic mode
-- **WHEN** an operator starts a review with the default progress mode and the progress output destination is not an interactive terminal
-- **THEN** the system emits stable newline-delimited plain progress without terminal control sequences
+- **WHEN** an operator starts a review with the default progress mode and standard error is not an interactive terminal
+- **THEN** the system emits stable newline-delimited plain progress to standard error without terminal control sequences
 
 #### Scenario: Explicit presentation mode
 - **WHEN** an operator selects `plain`, `json`, or `off`
@@ -43,7 +43,7 @@ The live terminal presentation SHALL use rich, colorful formatting wherever the 
 - **THEN** each state transition is retained as one human-readable line with no cursor movement or color escape sequence
 
 ### Requirement: Emit a versioned machine-readable event stream
-JSON progress SHALL emit exactly one complete JSON object per progress event, with no terminal control sequences or non-JSON progress text in that stream. Every event SHALL identify the progress contract version, opaque run identifier, monotonically increasing sequence number, UTC record time, non-negative elapsed seconds, phase, optional subject, state, sanitized message, and configured timeout when applicable.
+JSON progress SHALL emit exactly one complete JSON object per progress event on standard error, with no terminal control sequences or non-JSON progress text in that stream. Every event SHALL identify the progress contract version, opaque run identifier, monotonically increasing sequence number, UTC record time, non-negative elapsed seconds, phase, optional subject, state, sanitized message, and configured timeout when applicable.
 
 The `review-progress-event/v1` contract SHALL support these phases: `credentials`, `pr-metadata`, `provider-diff`, `workspace`, `bootstrap`, `registry`, `reviewers`, `coordination`, `schema-validation`, `diff-validation`, `head-freshness`, `payload`, `posting`, and `cleanup`. It SHALL support these states: `queued`, `running`, `succeeded`, `failed`, `timed-out`, `skipped`, and `interrupted`.
 
@@ -108,11 +108,29 @@ Before any reviewer model invocation starts, the system SHALL expose every selec
 ### Requirement: Retain an atomic progress snapshot
 After a review workspace exists, the system SHALL atomically maintain `host-artifacts/progress.json` as a complete snapshot of the latest observable run state. A reader MUST observe either the previous complete snapshot or the next complete snapshot, never partial JSON.
 
-The snapshot SHALL identify its contract version and run identifier; repository and pull request number; exact head SHA when known; dry-run or post mode; harness and maximum concurrency; overall phase and state; start, last-update, and finish times when known; every selected reviewer in registry order with state, elapsed duration, configured timeout, and sanitized failure summary when applicable; coordinator state; and final exit code and provider review URL when available.
+The snapshot SHALL satisfy the `review-progress-snapshot/v1` contract with exactly these top-level fields and types:
+
+- `contract`: the string `review-progress-snapshot/v1`;
+- `run_id`: a non-empty opaque string that matches the run's event stream;
+- `repository`: a non-empty `owner/name` string;
+- `pull_request`: a positive integer;
+- `head_sha`: the non-empty exact provider head SHA string checked out in the workspace;
+- `mode`: either `dry-run` or `post`;
+- `harness`: a non-empty harness identity string;
+- `max_concurrency`: an integer of at least one;
+- `overall`: an object with exactly `phase` and `state` string fields using the event contract's phase and state values;
+- `started_at` and `updated_at`: UTC RFC 3339 timestamp strings ending in `Z`;
+- `finished_at`: either a UTC RFC 3339 timestamp string ending in `Z` or `null` while unfinished;
+- `reviewers`: an array in registry order whose items satisfy the work-item contract below;
+- `coordinator`: either `null` before coordinator identity is available or a work-item object;
+- `final_exit_code`: either an integer or `null` until an exit outcome is known; and
+- `review_url`: either a non-empty provider review URL string or `null` when no accepted review URL is available.
+
+Each reviewer and coordinator work-item object SHALL contain exactly `name`, `state`, `started_at`, `finished_at`, `elapsed_seconds`, `timeout_seconds`, and `error_summary`. `name` SHALL be a non-empty string; `state` SHALL use an event-contract state; each timestamp SHALL be a UTC RFC 3339 string ending in `Z` or `null` when that transition has not occurred; `elapsed_seconds` SHALL be a non-negative number; `timeout_seconds` SHALL be a non-negative number; and `error_summary` SHALL be a sanitized string or `null`. Before registry discovery completes, `reviewers` SHALL be empty and `coordinator` SHALL be `null` rather than containing invented identities.
 
 #### Scenario: Workspace has been created
 - **WHEN** progress changes after the host-artifacts directory exists
-- **THEN** `progress.json` is atomically replaced with a valid snapshot of the latest state
+- **THEN** `progress.json` is atomically replaced with a valid `review-progress-snapshot/v1` object representing the latest state
 
 #### Scenario: Reader races with an update
 - **WHEN** a status reader opens the snapshot while the review process is updating it
@@ -139,7 +157,7 @@ The CLI SHALL provide `review-bot status <PR_URL> [--workspace-root PATH] [--jso
 
 #### Scenario: JSON status is requested
 - **WHEN** an operator adds `--json` to a valid status request
-- **THEN** the command emits the retained snapshot as parseable JSON without terminal control sequences
+- **THEN** the command emits the retained `review-progress-snapshot/v1` object on standard output as parseable JSON without terminal control sequences
 
 #### Scenario: Custom workspace root is requested
 - **WHEN** an operator supplies `--workspace-root`
@@ -150,7 +168,7 @@ The CLI SHALL provide `review-bot status <PR_URL> [--workspace-root PATH] [--jso
 - **THEN** the command reports a clear read error and performs no provider, model, posting, or workspace mutation
 
 ### Requirement: Sanitize progress data
-Progress events, human renderings, failure summaries, and retained snapshots MUST NOT contain credentials, environment-variable values, prompts, model input or output, finding bodies, repository file contents, or subprocess command lines that could reveal sensitive arguments. Failure information SHALL be bounded and SHALL identify the affected phase or reviewer without copying untrusted raw output.
+Progress events, human renderings, failure summaries, and retained snapshots MUST NOT contain credentials; values or paths from explicitly sensitive environment variables, including names that identify tokens, secrets, keys, passwords, or credentials; prompts; model input or output; finding bodies; repository file contents; or subprocess command lines that could reveal sensitive arguments. Required non-sensitive progress metadata such as repository identity, pull request number, and head SHA SHALL remain permitted even when the same value was also supplied through a benign environment variable. Failure information SHALL be bounded and SHALL identify the affected phase or reviewer without copying untrusted raw output.
 
 #### Scenario: Model returns sensitive output
 - **WHEN** a reviewer fails after writing model output or prompt material to its captured process streams
@@ -159,6 +177,10 @@ Progress events, human renderings, failure summaries, and retained snapshots MUS
 #### Scenario: Provider authentication fails
 - **WHEN** credentials or token minting fails
 - **THEN** progress reports the credentials phase failure without recording credential values or private-key paths
+
+#### Scenario: Benign review metadata is supplied through the environment
+- **WHEN** the pull request number or head SHA is also available through a non-sensitive review environment variable
+- **THEN** the required snapshot metadata may contain that value without copying unrelated environment data
 
 #### Scenario: Untrusted repository data causes a failure
 - **WHEN** a repository path, file content, bootstrap output, or finding body contributes to an error
@@ -177,7 +199,7 @@ Progress mode and status retention MUST NOT change reviewer selection, harness p
 
 #### Scenario: Final output is produced with JSON progress
 - **WHEN** a run uses JSON progress and also produces existing final operator output
-- **THEN** the progress stream remains independently parseable as JSON lines and the existing final output remains compatible
+- **THEN** standard error remains independently parseable as JSON progress lines and existing final output remains compatible on standard output
 
 ### Requirement: Record handled interruption truthfully
 When the process can handle an operator interruption or termination signal, the system SHALL stop live rendering cleanly, mark active work and the overall run as interrupted, retain that final state if the workspace still exists, and preserve the command's established interruption semantics. The system SHALL NOT claim a final retained update when abrupt process or machine termination makes one impossible.
