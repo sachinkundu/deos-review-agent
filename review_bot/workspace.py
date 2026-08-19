@@ -1,7 +1,7 @@
 """Isolated local workspace for a PR: clone, checkout, bootstrap, cleanup.
 
-The workspace keeps a prepared working copy of the PR head commit so review
-agents can read files outside the diff when context is needed.
+The workspace keeps the exact PR checkout under ``source/`` and every
+host-produced review artifact under its sibling ``host-artifacts/``.
 
 - Clone uses the installation token via ``GIT_ASKPASS`` (the token is never on
   the command line or in the URL).
@@ -152,9 +152,11 @@ class PRWorkspace:
         number: int,
         bootstrap_timeout: int = DEFAULT_BOOTSTRAP_TIMEOUT,
     ):
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve()
         self.bootstrap_timeout = bootstrap_timeout
         self.workdir = workspace_dir_for(self.root, owner, repo, number)
+        self.source_dir = self.workdir / "source"
+        self.artifact_dir = self.workdir / "host-artifacts"
 
     def setup(self, clone_url: str, head_sha: str, branch: str, token: str) -> Path:
         """Clone ``clone_url`` and check out ``head_sha`` on branch ``branch``.
@@ -170,8 +172,11 @@ class PRWorkspace:
         askpass = _write_askpass(self.workdir)
         git_env = {"GIT_ASKPASS": str(askpass), "RB_GIT_TOKEN": token}
         try:
+            self.workdir.mkdir(parents=True)
             clone = _git(
-                ["clone", "--quiet", clone_url, str(self.workdir)], cwd=self.root, env=git_env
+                ["clone", "--quiet", clone_url, str(self.source_dir)],
+                cwd=self.workdir,
+                env=git_env,
             )
             if clone.returncode != 0:
                 raise WorkspaceError(f"git clone failed: {_tail(clone)}")
@@ -184,7 +189,7 @@ class PRWorkspace:
                     "origin",
                     f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
                 ],
-                cwd=self.workdir,
+                cwd=self.source_dir,
                 env=git_env,
             )
             if fetch.returncode != 0:
@@ -192,26 +197,29 @@ class PRWorkspace:
 
             # Ensure the exact head SHA is present (PR refs may hold commits
             # not reachable from the branch tip).
-            exists = _git(["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=self.workdir)
+            exists = _git(["cat-file", "-e", f"{head_sha}^{{commit}}"], cwd=self.source_dir)
             if exists.returncode != 0:
                 by_sha = _git(
-                    ["fetch", "--quiet", "origin", head_sha], cwd=self.workdir, env=git_env
+                    ["fetch", "--quiet", "origin", head_sha],
+                    cwd=self.source_dir,
+                    env=git_env,
                 )
                 if by_sha.returncode != 0:
                     raise WorkspaceError(
                         f"head SHA {head_sha} could not be fetched: {_tail(by_sha)}"
                     )
 
-            checkout = _git(["checkout", "--quiet", "-B", branch, head_sha], cwd=self.workdir)
+            checkout = _git(["checkout", "--quiet", "-B", branch, head_sha], cwd=self.source_dir)
             if checkout.returncode != 0:
                 raise WorkspaceError(f"git checkout of head SHA failed: {_tail(checkout)}")
 
-            head = _git(["rev-parse", "HEAD"], cwd=self.workdir)
+            head = _git(["rev-parse", "HEAD"], cwd=self.source_dir)
             if head.returncode != 0 or head.stdout.strip() != head_sha:
                 raise WorkspaceError(
                     f"workspace HEAD is {head.stdout.strip()!r}, expected head SHA {head_sha!r}"
                 )
-            return self.workdir
+            self.artifact_dir.mkdir()
+            return self.source_dir
         finally:
             askpass.unlink(missing_ok=True)
 

@@ -1,0 +1,51 @@
+{
+  "contract": "review-harness-isolation-proof/v1",
+  "harness": "codex",
+  "command": "codex",
+  "model_override": "gpt-5.6-luna",
+  "cases": [
+    {
+      "case": "prompt-only",
+      "configured_skills": [],
+      "ok": true,
+      "duration_seconds": 13.061,
+      "markers_observed": [
+        "PROMPT_ONLY_OK"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    },
+    {
+      "case": "one-skill",
+      "configured_skills": [
+        "alpha-proof"
+      ],
+      "ok": true,
+      "duration_seconds": 17.361,
+      "markers_observed": [
+        "ALPHA_NATIVE_731"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    },
+    {
+      "case": "multiple-skills",
+      "configured_skills": [
+        "beta-proof",
+        "gamma-proof"
+      ],
+      "ok": true,
+      "duration_seconds": 22.227,
+      "markers_observed": [
+        "BETA_NATIVE_419",
+        "GAMMA_NATIVE_863"
+      ],
+      "missing_markers": [],
+      "forbidden_markers_observed": [],
+      "error": null
+    }
+  ],
+  "passed": true
+}

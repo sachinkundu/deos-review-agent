@@ -1,0 +1,1 @@
+Retain only one usable hardcoded-secret exposure or one explicit untrusted-input to command, query, template, or interpreter injection path with a concrete abuse case and remediation. Drop placeholders and general hardening advice from this source.

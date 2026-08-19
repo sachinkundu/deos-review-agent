@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from review_bot.agents.registry import AgentRegistry, discover_agent_registry, load_agent_package
 from review_bot.diff_filter import DiffFilterError
 from review_bot.github import Credentials, GitHubAppClient, PRInfo
-from review_bot.review import _load_prompt, build_review_body, run_review
-from review_bot.schema import load_schema
+from review_bot.review import build_review_body, run_review
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
 
@@ -22,36 +22,6 @@ def _env(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "456")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", str(key))
     monkeypatch.setenv("GITHUB_APP_BOT_USERNAME", "review-bot[bot]")
-
-
-def test_load_prompt_includes_shared_rules():
-    text = _load_prompt("correctness.md")
-    assert "Shared rules for all review agents" in text
-    assert "Exactly one issue per finding" in text
-    assert "Correctness review agent" in text
-
-
-def test_load_prompt_names_every_required_top_level_output_field():
-    text = _load_prompt("correctness.md")
-    for field in load_schema()["required"]:
-        assert f"`{field}`" in text
-
-
-@pytest.mark.parametrize(
-    ("name", "required", "forbidden"),
-    [
-        ("tests.md", "concrete regression", "Coverage percentages"),
-        ("safety.md", "source", "hardening advice"),
-    ],
-)
-def test_phase_2_prompts_state_focused_evidence_boundaries(
-    name: str, required: str, forbidden: str
-):
-    text = _load_prompt(name)
-    assert required in text
-    assert forbidden in text
-    for field in load_schema()["required"]:
-        assert f"`{field}`" in text
 
 
 def _make_pr(**overrides) -> PRInfo:
@@ -111,9 +81,10 @@ class FakeWorkspace(PRWorkspace):
 
     def setup(self, clone_url: str, head_sha: str, branch: str, token: str) -> Path:
         self.workdir.mkdir(parents=True, exist_ok=True)
-        (self.workdir / SHARED_CONTEXT_NAME).write_text("context")
-        (self.workdir / DIFF_NAME).write_text("diff")
-        return self.workdir
+        self.source_dir.mkdir()
+        self.artifact_dir.mkdir()
+        (self.source_dir / "reviewed.py").write_text("value = 1\n")
+        return self.source_dir
 
     def run_bootstrap(self, workdir: Path, extra_env=None):
         self.bootstrapped = True
@@ -301,7 +272,7 @@ def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff):
     assert posted == []
 
 
-def test_run_review_uses_fixed_four_agent_inputs_even_when_filtered_diff_empty(
+def test_run_review_uses_registered_agent_inputs_even_when_filtered_diff_empty(
     tmp_path: Path, sample_diff
 ):
     pr = _make_pr()
@@ -341,10 +312,18 @@ def test_run_review_uses_fixed_four_agent_inputs_even_when_filtered_diff_empty(
     assert sorted(runner.calls[:4]) == ["api-reality", "correctness", "safety", "tests"]
     assert runner.calls[-1] == "coordinator"
     inputs_by_name = {spec.name: spec.input_files for spec in runner.specs}
-    assert inputs_by_name["correctness"] == ("shared-context.md", "review-diff.diff")
-    assert inputs_by_name["api-reality"] == ("shared-context.md", "review-diff.diff")
-    assert inputs_by_name["tests"] == ("shared-context.md", "review-diff.diff")
-    assert inputs_by_name["safety"] == ("shared-context.md", "provider-diff.diff")
+    assert inputs_by_name["correctness"] == (
+        "inputs/shared-context.md",
+        "inputs/review-diff.diff",
+        "input-manifest.json",
+    )
+    assert inputs_by_name["api-reality"] == inputs_by_name["correctness"]
+    assert inputs_by_name["tests"] == inputs_by_name["correctness"]
+    assert inputs_by_name["safety"] == (
+        "inputs/shared-context.md",
+        "inputs/provider-diff.diff",
+        "input-manifest.json",
+    )
 
 
 def test_run_review_all_agents_failed_stops_before_coordinator(tmp_path: Path, sample_diff):
@@ -372,6 +351,55 @@ def test_run_review_all_agents_failed_stops_before_coordinator(tmp_path: Path, s
     assert sorted(runner.calls) == ["api-reality", "correctness", "safety", "tests"]
     assert "coordinator" not in runner.calls
     assert posted == []
+
+
+def test_new_registered_reviewer_runs_without_orchestration_or_coordinator_edits(
+    monkeypatch, tmp_path: Path, sample_diff
+):
+    package = tmp_path / "packages" / "fifth-reviewer"
+    package.mkdir(parents=True)
+    (package / "agent.yaml").write_text(
+        "version: review-bot/v1\n"
+        "name: fifth-reviewer\n"
+        "kind: reviewer\n"
+        "description: A dynamically installed fifth reviewer.\n"
+        "prompt: prompt.md\n"
+        "inputs:\n"
+        "  - pr-context\n"
+        "  - review-diff\n"
+        "output_schema: review-result/v1\n"
+        "order: 50\n"
+        "coordinator_policy: coordinator-policy.md\n"
+    )
+    (package / "prompt.md").write_text("Review this change.")
+    (package / "coordinator-policy.md").write_text("Keep concrete findings.")
+    added = load_agent_package(package)
+    builtin = discover_agent_registry()
+    registry = AgentRegistry(reviewers=(*builtin.reviewers, added), coordinator=builtin.coordinator)
+    monkeypatch.setattr("review_bot.review.discover_agent_registry", lambda: registry)
+
+    final = make_review(findings=[], overall_correctness="patch is correct")
+    runner = FakeAgentRunner({agent.name: final for agent in registry.all_agents})
+    workspace = FakeWorkspace(tmp_path / "run", "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--dry-run",
+            "--keep-workspace",
+            "--workspace-root",
+            str(tmp_path / "run"),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    assert exit_code == 0
+    assert runner.calls[-1] == "coordinator"
+    assert "fifth-reviewer" in runner.calls[:-1]
+    catalog = __import__("json").loads((workspace.artifact_dir / "agent-catalog.json").read_text())
+    assert [agent["name"] for agent in catalog["agents"]][-1] == "fifth-reviewer"
 
 
 def test_run_review_safety_finding_on_filtered_file_uses_provider_diff(tmp_path: Path):
@@ -454,5 +482,10 @@ def test_run_review_workspace_cleanup_and_artifact_retention(
 
     assert exit_code == 0
     assert workspace.removed is removed
-    assert (workspace.workdir / "provider-diff.diff").read_text() == sample_diff
-    assert (workspace.workdir / "diff-filter.json").exists()
+    assert (workspace.artifact_dir / "provider-diff.diff").read_text() == sample_diff
+    assert (workspace.artifact_dir / "diff-filter.json").exists()
+    assert (workspace.artifact_dir / "run-manifest.json").exists()
+    assert (workspace.artifact_dir / "agent-catalog.json").exists()
+    assert (workspace.artifact_dir / "raw-findings.json").exists()
+    assert (workspace.artifact_dir / "unposted-review.json").exists()
+    assert not (workspace.source_dir / "provider-diff.diff").exists()

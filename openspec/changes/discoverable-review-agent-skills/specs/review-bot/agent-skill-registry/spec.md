@@ -59,7 +59,7 @@ An agent SHALL have its own prompt and MAY contain zero or more skill directorie
 
 #### Scenario: Agent has multiple skills
 - **WHEN** a package contains multiple valid Agent Skills
-- **THEN** the harness exposes all and only those skills in deterministic skill-name order for that agent invocation
+- **THEN** the harness exposes all and only those application-provided skills in deterministic skill-name order for that agent invocation
 
 #### Scenario: Invalid Agent Skill
 - **WHEN** a bundled `SKILL.md` violates a normative Agent Skills constraint
@@ -70,7 +70,7 @@ An agent SHALL have its own prompt and MAY contain zero or more skill directorie
 - **THEN** the field does not expand the tools or filesystem permissions granted by the review-bot runner
 
 ### Requirement: Isolate native harness loading
-For each selected agent, the system SHALL supply the agent prompt normally and make only that agent's bundled skills available through the configured harness's native Agent Skills mechanism. The system MUST NOT simulate skill activation by concatenating `SKILL.md` bodies into the agent prompt, and it MUST NOT expose ambient or pull-request-provided skills.
+For each selected agent, the system SHALL supply the agent prompt normally and make only that agent's application-provided bundled skills available through the configured harness's native Agent Skills mechanism. The system MUST NOT simulate skill activation by concatenating `SKILL.md` bodies into the agent prompt, and it MUST NOT expose user, admin, or pull-request-provided skills. Capabilities bundled into the selected harness binary by its provider are part of the trusted harness boundary, not application-provided agent skills.
 
 #### Scenario: Pi agent starts
 - **WHEN** a selected agent runs through Pi
@@ -78,7 +78,7 @@ For each selected agent, the system SHALL supply the agent prompt normally and m
 
 #### Scenario: Codex agent starts
 - **WHEN** a selected agent runs through Codex
-- **THEN** Codex uses clean temporary `HOME` and `CODEX_HOME` roots, receives only the minimum forwarded authentication material, discovers only the agent's optional skills from an isolated trusted Agent Skills location, and does not discover ambient or pull-request skills
+- **THEN** Codex uses clean temporary `HOME` and `CODEX_HOME` roots, receives only the minimum forwarded authentication material, discovers only the agent's application-provided optional skills from an isolated trusted Agent Skills location, fails closed if the container has admin skills, and does not discover user or pull-request skills
 
 #### Scenario: Unsupported harness is selected
 - **WHEN** the configured command has no adapter that can provide isolated native Agent Skills loading

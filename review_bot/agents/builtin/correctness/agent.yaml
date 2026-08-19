@@ -1,0 +1,11 @@
+version: review-bot/v1
+name: correctness
+kind: reviewer
+description: Finds concrete logic, error-path, claim, and lifecycle-ordering bugs.
+prompt: prompt.md
+inputs:
+  - pr-context
+  - review-diff
+output_schema: review-result/v1
+order: 10
+coordinator_policy: coordinator-policy.md

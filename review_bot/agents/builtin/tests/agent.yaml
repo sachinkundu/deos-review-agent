@@ -1,0 +1,11 @@
+version: review-bot/v1
+name: tests
+kind: reviewer
+description: Finds concrete regression gaps and ineffective assertions for changed behavior.
+prompt: prompt.md
+inputs:
+  - pr-context
+  - review-diff
+output_schema: review-result/v1
+order: 30
+coordinator_policy: coordinator-policy.md

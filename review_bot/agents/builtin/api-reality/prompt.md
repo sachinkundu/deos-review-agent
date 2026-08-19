@@ -18,15 +18,13 @@ changed code use the real, published APIs of its dependencies?
 
 Consult the dependency's **published API documentation** with your web tools
 before flagging. Prefer official docs over blogs or Stack Overflow, and prefer
-the version the project actually declares (check dependency manifests and
-lockfiles) when behavior is version-specific.
+the version the project actually declares when behavior is version-specific.
 
 ## What NOT to flag
 
 - Logic bugs that do not involve a dependency API.
 - Style, formatting, naming, or refactoring suggestions.
-- APIs you could not verify: if you cannot find the documentation, do not
-  speculate — skip it.
+- APIs you could not verify: if you cannot find the documentation, skip it.
 
 ## Additional rule for API-reality findings
 

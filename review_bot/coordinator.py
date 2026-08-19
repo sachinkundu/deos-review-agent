@@ -12,12 +12,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .agents.registry import AgentRegistry
 from .agents.runner import AgentResult, AgentRunner, AgentSpec
-from .diff_filter import PROVIDER_DIFF_NAME
-from .shared_context import SHARED_CONTEXT_NAME
 
 RAW_FINDINGS_NAME = "raw-findings.json"
-PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
 class CoordinatorError(Exception):
@@ -30,6 +28,8 @@ def write_raw_findings(workdir: Path, results: list[AgentResult]) -> Path:
     for result in results:
         entry: dict = {
             "agent": result.name,
+            "contract_version": result.contract_version,
+            "package_digest": result.package_digest,
             "status": "completed" if result.ok else "failed",
             "findings": [],
         }
@@ -47,24 +47,34 @@ def write_raw_findings(workdir: Path, results: list[AgentResult]) -> Path:
     return path
 
 
-def load_coordinator_prompt() -> str:
-    text = (PROMPTS_DIR / "coordinator.md").read_text(encoding="utf-8")
-    shared = (PROMPTS_DIR / "shared-rules.md").read_text(encoding="utf-8")
-    return text.replace("{{shared_rules}}", shared)
+def validate_result_identities(registry: AgentRegistry, results: list[AgentResult]) -> None:
+    """Require a one-to-one identity match with every selected reviewer."""
+    expected = {
+        agent.name: (agent.contract_version, agent.package_digest) for agent in registry.reviewers
+    }
+    if [result.name for result in results] != [agent.name for agent in registry.reviewers]:
+        raise CoordinatorError("raw result roster or order does not match the selected catalog")
+    for result in results:
+        identity = (result.contract_version, result.package_digest)
+        if expected.get(result.name) != identity:
+            raise CoordinatorError(
+                f"raw result identity mismatch for agent {result.name!r}: {identity!r}"
+            )
 
 
-def run_coordinator(runner: AgentRunner, workdir: Path) -> dict:
+def run_coordinator(runner: AgentRunner, spec: AgentSpec, workdir: Path) -> dict:
     """Run the coordinator and return its validated output.
 
     Raises CoordinatorError when the coordinator fails or its output does not
     match the review schema (the run must stop without posting).
     """
-    spec = AgentSpec(
-        name="coordinator",
-        prompt=load_coordinator_prompt(),
-        input_files=(SHARED_CONTEXT_NAME, RAW_FINDINGS_NAME, PROVIDER_DIFF_NAME),
-    )
     result = runner.run(spec, workdir)
+    if (result.name, result.contract_version, result.package_digest) != (
+        spec.name,
+        spec.contract_version,
+        spec.package_digest,
+    ):
+        raise CoordinatorError("coordinator result identity does not match its trusted package")
     if not result.ok or result.output is None:
         raise CoordinatorError(f"coordinator failed: {result.error}")
     # The `status` field must survive the coordinator rewrite (it is used by

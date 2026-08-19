@@ -1,0 +1,77 @@
+{
+  "contract": "review-run-manifest/v1",
+  "agents": [
+    {
+      "name": "correctness",
+      "kind": "reviewer",
+      "contract_version": "review-bot/v1",
+      "order": 10,
+      "inputs": [
+        "pr-context",
+        "review-diff"
+      ],
+      "package_digest": "sha256:4cb1c481af8d55198b51bab64a6cca7832cec958f94aad775a3b983926f0a624",
+      "skills": [],
+      "status": "selected",
+      "harness": "pi"
+    },
+    {
+      "name": "api-reality",
+      "kind": "reviewer",
+      "contract_version": "review-bot/v1",
+      "order": 20,
+      "inputs": [
+        "pr-context",
+        "review-diff"
+      ],
+      "package_digest": "sha256:6d6950a861ad492f7ef65eb9d43d06b1fd8850d77288fdcebdc443731d77f677",
+      "skills": [],
+      "status": "selected",
+      "harness": "pi"
+    },
+    {
+      "name": "tests",
+      "kind": "reviewer",
+      "contract_version": "review-bot/v1",
+      "order": 30,
+      "inputs": [
+        "pr-context",
+        "review-diff"
+      ],
+      "package_digest": "sha256:9009a40a9aa5f8db92511be0d3bfef48ed401fba1f773e8691459734599bbcf7",
+      "skills": [],
+      "status": "selected",
+      "harness": "pi"
+    },
+    {
+      "name": "safety",
+      "kind": "reviewer",
+      "contract_version": "review-bot/v1",
+      "order": 40,
+      "inputs": [
+        "pr-context",
+        "provider-diff"
+      ],
+      "package_digest": "sha256:2a69502989167fb0cab930a2e8bd3d6a3934dba68b0540c81b104402cc468ab6",
+      "skills": [],
+      "status": "selected",
+      "harness": "pi"
+    },
+    {
+      "name": "coordinator",
+      "kind": "coordinator",
+      "contract_version": "review-bot/v1",
+      "order": 100,
+      "inputs": [
+        "pr-context",
+        "agent-catalog",
+        "raw-findings",
+        "provider-diff"
+      ],
+      "package_digest": "sha256:f765c7ed6dbe545f2a60d52a76b769f09b1df4d0eab24c47975d72c86f06ed93",
+      "skills": [],
+      "status": "selected",
+      "harness": "pi"
+    }
+  ]
+}

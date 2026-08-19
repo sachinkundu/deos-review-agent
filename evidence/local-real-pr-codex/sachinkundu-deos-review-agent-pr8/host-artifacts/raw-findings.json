@@ -1,0 +1,106 @@
+{
+  "agents": [
+    {
+      "agent": "correctness",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:4cb1c481af8d55198b51bab64a6cca7832cec958f94aad775a3b983926f0a624",
+      "status": "completed",
+      "findings": []
+    },
+    {
+      "agent": "api-reality",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:6d6950a861ad492f7ef65eb9d43d06b1fd8850d77288fdcebdc443731d77f677",
+      "status": "completed",
+      "findings": [
+        {
+          "title": "Codex cannot be restricted to only staged skills as specified",
+          "body": "The Codex contract claims that a clean HOME/CODEX_HOME and staged `.agents/skills` directory make only this agent's skills available. Codex's published skill-loading documentation says it also loads repository, admin (`/etc/codex/skills`), and bundled system skills, and scans repository `.agents/skills` locations from the working directory to the repository root: https://developers.openai.com/codex/skills/. Therefore a host system skill or pull-request repository skill can still enter the catalog and instructions despite the proposed isolation. A run on a machine with `/etc/codex/skills` or a checked-out repository `.agents/skills` would violate the stated guarantee.",
+          "confidence_score": 0.97,
+          "priority": 1,
+          "code_location": {
+            "absolute_file_path": "openspec/changes/discoverable-review-agent-skills/specs/review-bot/agent-skill-registry/spec.md",
+            "line_range": {
+              "start": 541,
+              "end": 541
+            }
+          },
+          "suggested_fix": {
+            "description": "Define an isolation mechanism supported by the installed Codex version that filters every discovered skill scope, or weaken the contract and explicitly account for unavoidable system/admin skills.",
+            "replacement": ""
+          },
+          "source_agent": "api-reality"
+        }
+      ]
+    },
+    {
+      "agent": "tests",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:9009a40a9aa5f8db92511be0d3bfef48ed401fba1f773e8691459734599bbcf7",
+      "status": "completed",
+      "findings": [
+        {
+          "title": "Add a test that enforces unassigned artifact isolation",
+          "body": "The new resource-isolation contract requires a filtered reviewer to have no path to `provider-diff` (lines 547-552), but the existing runner test only asserts that the filename is absent from the prompt. A regression that leaves `provider-diff.diff` in the capsule or source checkout would still pass while allowing the reviewer to bypass its filtered input boundary. Add a capsule-level test that places the complete provider diff in the host artifact root and asserts it is absent and unreachable from a filtered reviewer invocation.",
+          "confidence_score": 0.98,
+          "priority": 1,
+          "code_location": {
+            "absolute_file_path": "openspec/changes/discoverable-review-agent-skills/specs/review-bot/agent-skill-registry/spec.md",
+            "line_range": {
+              "start": 92,
+              "end": 92
+            }
+          },
+          "suggested_fix": {
+            "description": "Add a deterministic isolation test covering the filesystem view, not only prompt contents.",
+            "replacement": ""
+          },
+          "source_agent": "tests"
+        },
+        {
+          "title": "Add a test proving Codex excludes ambient and target skills",
+          "body": "The Codex contract requires clean temporary `HOME` and `CODEX_HOME` roots and exclusion of ambient and pull-request skills (lines 532-541), but the available Codex tests only inspect schema setup and prompt text; they do not seed or inspect either skill source. An adapter could preserve the real Codex home or discover a target-repository skill and all current assertions would still pass. Add a harness test with sentinel skills in the ambient Codex home and checked-out repository, then assert the effective catalog contains only the owning agent's bundled skills and that the real homes are not used.",
+          "confidence_score": 0.96,
+          "priority": 1,
+          "code_location": {
+            "absolute_file_path": "openspec/changes/discoverable-review-agent-skills/specs/review-bot/agent-skill-registry/spec.md",
+            "line_range": {
+              "start": 81,
+              "end": 81
+            }
+          },
+          "suggested_fix": {
+            "description": "Add an isolated Codex adapter test using sentinel ambient and target-repository skills.",
+            "replacement": ""
+          },
+          "source_agent": "tests"
+        },
+        {
+          "title": "Test that every bundled resource affects the package digest",
+          "body": "The design makes the package digest an audit identity covering prompts, policies, scripts, references, assets, and skill instructions, and the registry contract requires the digest to change when any bundled skill resource changes (lines 558-567). There is no available registry/digest test, so an implementation could hash only `agent.yaml` and `SKILL.md`; prompt-only behavior would still work while changes to a skill script or reference go undetected in the run manifest. Add a test that mutates each non-manifest bundled resource and asserts the package digest changes.",
+          "confidence_score": 0.94,
+          "priority": 1,
+          "code_location": {
+            "absolute_file_path": "openspec/changes/discoverable-review-agent-skills/specs/review-bot/agent-skill-registry/spec.md",
+            "line_range": {
+              "start": 106,
+              "end": 107
+            }
+          },
+          "suggested_fix": {
+            "description": "Add digest regression tests for prompt, policy, and all optional skill resource classes.",
+            "replacement": ""
+          },
+          "source_agent": "tests"
+        }
+      ]
+    },
+    {
+      "agent": "safety",
+      "contract_version": "review-bot/v1",
+      "package_digest": "sha256:2a69502989167fb0cab930a2e8bd3d6a3934dba68b0540c81b104402cc468ab6",
+      "status": "completed",
+      "findings": []
+    }
+  ]
+}

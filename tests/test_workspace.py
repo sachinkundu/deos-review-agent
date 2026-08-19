@@ -57,10 +57,20 @@ def test_workspace_dir_for():
     )
 
 
+def test_workspace_normalizes_relative_root(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    workspace = PRWorkspace(Path("relative-root"), "owner", "repo", 7)
+    assert workspace.root == tmp_path / "relative-root"
+    assert workspace.source_dir.is_absolute()
+
+
 def test_setup_clones_and_checks_out(local_clone_url, head_sha, workspace):
     workdir = workspace.setup(local_clone_url, head_sha, "feature", token="fake-token")
     assert workdir.exists()
-    assert workdir.name == "owner-repo-pr7"
+    assert workdir == workspace.source_dir
+    assert workdir.name == "source"
+    assert workspace.artifact_dir.is_dir()
+    assert workspace.artifact_dir.parent == workspace.workdir
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(workdir),
@@ -89,7 +99,7 @@ def test_setup_removes_stale_workspace(local_clone_url, head_sha, workspace):
     (workspace.workdir / "stale.txt").write_text("old")
     workspace.setup(local_clone_url, head_sha, "feature", token="fake-token")
     assert not (workspace.workdir / "stale.txt").exists()
-    assert (workspace.workdir / "main.py").exists()
+    assert (workspace.source_dir / "main.py").exists()
 
 
 def test_run_bootstrap_success(local_clone_url, head_sha, workspace):

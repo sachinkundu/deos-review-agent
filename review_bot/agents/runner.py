@@ -14,13 +14,21 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..schema import SchemaError, validate_review_output
+from ..schema import SchemaError, load_schema, validate_review_output
+from .registry import AgentSkill, package_digest
 
 DEFAULT_AGENT_TIMEOUT = 1800
+DEFAULT_MAX_CONCURRENCY = 4
+CODEX_ADMIN_SKILLS_ROOT = Path("/etc/codex/skills")
+
+
+class HarnessError(RuntimeError):
+    """The configured command cannot provide the required isolated harness."""
 
 
 def _extract_json(text: str) -> dict:
@@ -50,17 +58,27 @@ def _extract_json(text: str) -> dict:
     raise ValueError("no JSON object found in agent output")
 
 
-def _validate(name: str, data: dict) -> AgentResult:
+def _validate(spec: AgentSpec, data: dict, duration_seconds: float = 0.0) -> AgentResult:
     try:
         validate_review_output(data)
     except SchemaError as e:
         return AgentResult(
-            name=name,
+            name=spec.name,
+            contract_version=spec.contract_version,
+            package_digest=spec.package_digest,
             ok=False,
             error=f"agent output failed schema validation: {e}",
+            duration_seconds=duration_seconds,
             extra={"invalid_output": data},
         )
-    return AgentResult(name=name, ok=True, output=data)
+    return AgentResult(
+        name=spec.name,
+        contract_version=spec.contract_version,
+        package_digest=spec.package_digest,
+        ok=True,
+        output=data,
+        duration_seconds=duration_seconds,
+    )
 
 
 @dataclass
@@ -69,6 +87,8 @@ class AgentResult:
 
     name: str
     ok: bool
+    contract_version: str = ""
+    package_digest: str = ""
     output: dict | None = None
     error: str | None = None
     duration_seconds: float = 0.0
@@ -89,6 +109,10 @@ class AgentSpec:
     name: str
     prompt: str
     input_files: tuple[str, ...]
+    contract_version: str = ""
+    package_digest: str = ""
+    skills: tuple[AgentSkill, ...] = ()
+    package_dir: Path | None = None
 
 
 class AgentRunner:
@@ -102,17 +126,80 @@ class AgentRunner:
 
 
 def run_agents_concurrently(
-    runner: AgentRunner, specs: list[AgentSpec], workdir: Path
+    runner: AgentRunner,
+    invocations: list[tuple[AgentSpec, Path]],
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
 ) -> list[AgentResult]:
-    """Run every explicit agent spec concurrently; results keep roster order."""
+    """Run every invocation with bounded concurrency; keep registry order."""
 
-    def _one(spec: AgentSpec) -> AgentResult:
+    def _one(invocation: tuple[AgentSpec, Path]) -> AgentResult:
+        spec, workdir = invocation
         return runner.run(spec, workdir)
 
-    if not specs:
+    if not invocations:
         return []
-    with ThreadPoolExecutor(max_workers=len(specs)) as pool:
-        return list(pool.map(_one, specs))
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency must be at least 1")
+    for spec, _workdir in invocations:
+        verify_spec_package(spec)
+    with ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency)) as pool:
+        return list(pool.map(_one, invocations))
+
+
+def verify_spec_package(spec: AgentSpec) -> None:
+    """Recompute package identity immediately before a harness launch."""
+    if spec.package_dir is None:
+        return
+    current = package_digest(spec.package_dir)
+    if current != spec.package_digest:
+        raise HarnessError(
+            f"agent package {spec.name!r} changed before launch: "
+            f"expected {spec.package_digest}, found {current}"
+        )
+
+
+def verify_harness_command(command: str, harness: str) -> str:
+    """Verify the installed real CLI exposes the isolation flags we rely on."""
+    expected = Path(command).name
+    if harness not in ("pi", "codex") or expected != harness:
+        raise HarnessError(f"unsupported review harness command: {command!r}")
+    help_cmd = [command, "--help"] if harness == "pi" else [command, "exec", "--help"]
+    try:
+        version = subprocess.run([command, "--version"], capture_output=True, text=True, timeout=15)
+        help_result = subprocess.run(help_cmd, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HarnessError(f"cannot inspect {harness} harness {command!r}: {exc}") from exc
+    if version.returncode != 0 or help_result.returncode != 0:
+        raise HarnessError(f"cannot inspect {harness} harness {command!r}")
+    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+    required = (
+        ("--no-skills", "--skill", "--no-extensions", "--no-context-files")
+        if harness == "pi"
+        else ("--ignore-user-config", "--ignore-rules", "--sandbox", "--ephemeral")
+    )
+    missing = [flag for flag in required if flag not in help_text]
+    if missing:
+        raise HarnessError(
+            f"{harness} harness {command!r} lacks required isolation flags: {missing}"
+        )
+    if harness == "codex":
+        _verify_codex_admin_skills_absent()
+    return (version.stdout or version.stderr).strip()
+
+
+def _verify_codex_admin_skills_absent() -> None:
+    """Reject machine-level skills outside the per-agent invocation capsule."""
+    try:
+        admin_skills = sorted(CODEX_ADMIN_SKILLS_ROOT.rglob("SKILL.md"))
+    except OSError as exc:
+        raise HarnessError(
+            f"cannot inspect Codex admin skill scope {CODEX_ADMIN_SKILLS_ROOT}: {exc}"
+        ) from exc
+    if admin_skills:
+        raise HarnessError(
+            "Codex admin skill scope must be empty for isolated review runs: "
+            f"{CODEX_ADMIN_SKILLS_ROOT}"
+        )
 
 
 class CodexAgentRunner(AgentRunner):
@@ -137,18 +224,27 @@ class CodexAgentRunner(AgentRunner):
         self.command = command
         self.model = model
         self.timeout = timeout
-        self._schema = schema
+        self._schema = schema or load_schema()
         self._tmpdir = Path(tempfile.mkdtemp(prefix="review-bot-agent-"))
         self._schema_file = self._tmpdir / "review-output.schema.json"
-        if self._schema is not None:
-            self._schema_file.write_text(json.dumps(self._schema), encoding="utf-8")
+        self._schema_file.write_text(json.dumps(self._schema), encoding="utf-8")
 
     def close(self) -> None:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+        verify_spec_package(spec)
+        started = time.monotonic()
         out_file = self._tmpdir / f"{spec.name}.json"
         out_file.unlink(missing_ok=True)
+        staged_skills = workdir / ".agents" / "skills"
+        for skill in spec.skills:
+            shutil.copytree(skill.skill_dir, staged_skills / skill.name)
+        isolated_home = self._tmpdir / f"{spec.name}-home"
+        isolated_codex_home = self._tmpdir / f"{spec.name}-codex-home"
+        isolated_home.mkdir()
+        isolated_codex_home.mkdir()
+        env = self._isolated_env(isolated_home, isolated_codex_home)
         cmd = [
             self.command,
             "exec",
@@ -156,15 +252,18 @@ class CodexAgentRunner(AgentRunner):
             "read-only",
             "--cd",
             str(workdir),
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
             "--output-schema",
             str(self._schema_file),
             "-o",
             str(out_file),
             "--ephemeral",
-            "-",
         ]
         if self.model:
             cmd += ["--model", self.model]
+        cmd.append("-")
 
         assigned_inputs = "\n".join(f"- `{name}`" for name in spec.input_files)
         prompt = (
@@ -180,37 +279,77 @@ class CodexAgentRunner(AgentRunner):
                 text=True,
                 timeout=self.timeout,
                 cwd=str(workdir),
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent timed out after {self.timeout}s"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent timed out after {self.timeout}s",
+                duration_seconds=time.monotonic() - started,
             )
-        except FileNotFoundError as e:
+        except OSError as e:
             return AgentResult(
                 name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent command not found: {self.command!r} ({e})",
+                error=f"agent command could not be started: {self.command!r} ({e})",
+                duration_seconds=time.monotonic() - started,
             )
 
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip()[-800:]
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent exited {proc.returncode}: {tail}"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent exited {proc.returncode}: {tail}",
+                duration_seconds=time.monotonic() - started,
             )
         if not out_file.exists():
             tail = (proc.stderr or "").strip()[-400:]
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent produced no output file ({tail})"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent produced no output file ({tail})",
+                duration_seconds=time.monotonic() - started,
             )
 
         try:
             data = json.loads(out_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeError, OSError) as e:
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent output is not valid JSON: {e}"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent output is not readable JSON: {e}",
+                duration_seconds=time.monotonic() - started,
             )
 
-        return _validate(spec.name, data)
+        return _validate(spec, data, time.monotonic() - started)
+
+    def _isolated_env(self, home: Path, codex_home: Path) -> dict[str, str]:
+        allowed = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "TMPDIR")
+        env = {name: os.environ[name] for name in allowed if name in os.environ}
+        env["HOME"] = str(home)
+        env["CODEX_HOME"] = str(codex_home)
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if api_key:
+            env["OPENAI_API_KEY"] = api_key
+        source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        source_auth = source_home / "auth.json"
+        if not api_key and source_auth.is_file():
+            destination = codex_home / "auth.json"
+            shutil.copyfile(source_auth, destination)
+            destination.chmod(0o600)
+        return env
 
 
 class PiAgentRunner(AgentRunner):
@@ -246,6 +385,7 @@ class PiAgentRunner(AgentRunner):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _run_once(self, spec: AgentSpec, prompt_file: Path, workdir: Path) -> AgentResult:
+        started = time.monotonic()
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
         per_agent_key = f"REVIEW_{spec.name.upper().replace('-', '_')}_THINKING"
         thinking = os.environ.get(per_agent_key) or self.thinking
@@ -255,6 +395,14 @@ class PiAgentRunner(AgentRunner):
             "--print",
             "--mode",
             "text",
+            "--no-skills",
+            "--no-extensions",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-approve",
+            "--tools",
+            "read,grep,find,ls",
         ]
         if self.persist_session:
             cmd += ["--name", f"review-bot-{spec.name}"]
@@ -265,6 +413,8 @@ class PiAgentRunner(AgentRunner):
         if self.model:
             cmd += ["--model", self.model]
         cmd += ["--system-prompt", str(prompt_file)]
+        for skill in spec.skills:
+            cmd += ["--skill", str(skill.skill_dir)]
         cmd += [f"@{input_file}" for input_file in spec.input_files]
 
         try:
@@ -277,19 +427,32 @@ class PiAgentRunner(AgentRunner):
             )
         except subprocess.TimeoutExpired:
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent timed out after {self.timeout}s"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent timed out after {self.timeout}s",
+                duration_seconds=time.monotonic() - started,
             )
-        except FileNotFoundError as e:
+        except OSError as e:
             return AgentResult(
                 name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent command not found: {self.command!r} ({e})",
+                error=f"agent command could not be started: {self.command!r} ({e})",
+                duration_seconds=time.monotonic() - started,
             )
 
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "").strip()[-800:]
             return AgentResult(
-                name=spec.name, ok=False, error=f"agent exited {proc.returncode}: {tail}"
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent exited {proc.returncode}: {tail}",
+                duration_seconds=time.monotonic() - started,
             )
 
         try:
@@ -298,13 +461,17 @@ class PiAgentRunner(AgentRunner):
             tail = proc.stdout.strip()[-800:]
             return AgentResult(
                 name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
                 ok=False,
                 error=f"agent output is not valid JSON: {e} ({tail})",
+                duration_seconds=time.monotonic() - started,
             )
 
-        return _validate(spec.name, data)
+        return _validate(spec, data, time.monotonic() - started)
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+        verify_spec_package(spec)
         prompt_file = self._tmpdir / f"{spec.name}-prompt.md"
         prompt_file.write_text(spec.prompt, encoding="utf-8")
 
@@ -324,7 +491,15 @@ class PiAgentRunner(AgentRunner):
         )
         repair_prompt_file = self._tmpdir / f"{spec.name}-repair-prompt.md"
         repair_prompt_file.write_text(repair_prompt, encoding="utf-8")
-        repair_spec = AgentSpec(spec.name, repair_prompt, spec.input_files)
+        repair_spec = AgentSpec(
+            spec.name,
+            repair_prompt,
+            spec.input_files,
+            spec.contract_version,
+            spec.package_digest,
+            spec.skills,
+            spec.package_dir,
+        )
         repaired = self._run_once(repair_spec, repair_prompt_file, workdir)
         if not repaired.ok:
             repaired.error = f"{result.error}; schema repair failed: {repaired.error}"

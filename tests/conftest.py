@@ -179,12 +179,34 @@ class FakeAgentRunner(AgentRunner):
         self.specs.append(spec)
         result = self.results.get(spec.name)
         if result is None:
-            return AgentResult(name=spec.name, ok=False, error="no canned result")
+            return AgentResult(
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error="no canned result",
+            )
         if isinstance(result, Exception):
-            return AgentResult(name=spec.name, ok=False, error=str(result))
+            return AgentResult(
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=str(result),
+            )
         if isinstance(result, AgentResult):
+            if not result.contract_version:
+                result.contract_version = spec.contract_version
+            if not result.package_digest:
+                result.package_digest = spec.package_digest
             return result
-        return AgentResult(name=spec.name, ok=True, output=cast(dict[str, Any], result))
+        return AgentResult(
+            name=spec.name,
+            contract_version=spec.contract_version,
+            package_digest=spec.package_digest,
+            ok=True,
+            output=cast(dict[str, Any], result),
+        )
 
     def close(self) -> None:
         self.closed = True

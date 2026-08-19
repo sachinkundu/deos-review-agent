@@ -1,0 +1,11 @@
+version: review-bot/v1
+name: safety
+kind: reviewer
+description: Finds high-confidence usable hardcoded secrets and explicit injection paths.
+prompt: prompt.md
+inputs:
+  - pr-context
+  - provider-diff
+output_schema: review-result/v1
+order: 40
+coordinator_policy: coordinator-policy.md
