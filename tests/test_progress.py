@@ -170,6 +170,38 @@ def test_rich_live_elapsed_advances_only_from_monotonic_time(monkeypatch):
         renderer.close()
 
 
+def test_rich_live_operations_run_without_holding_state_lock():
+    renderer = RichProgressRenderer(io.StringIO(), no_color=True)
+    operations: list[str] = []
+
+    class LockCheckingLive:
+        def _record(self, operation: str) -> None:
+            assert not renderer._lock._is_owned()  # type: ignore[attr-defined,reportPrivateUsage]
+            operations.append(operation)
+
+        def start(self, refresh: bool = False) -> None:
+            assert refresh is True
+            self._record("start")
+
+        def refresh(self) -> None:
+            self._record("refresh")
+
+        def stop(self) -> None:
+            self._record("stop")
+
+    renderer._live = LockCheckingLive()  # type: ignore[reportPrivateUsage]
+    event = {
+        "phase": "registry",
+        "state": "running",
+        "elapsed_seconds": 0.0,
+    }
+    renderer.render(event, None)
+    renderer.render(event, None)
+    renderer.close()
+
+    assert operations == ["start", "refresh", "stop"]
+
+
 def test_snapshot_is_exact_schema_and_tracks_registry_order(tmp_path: Path):
     stream = io.StringIO()
     clock = Clock()
@@ -358,19 +390,30 @@ def test_finish_publishes_terminal_failure_event(tmp_path: Path):
 
 def test_renderer_and_store_failures_do_not_change_control_flow(tmp_path: Path):
     class BrokenRenderer:
+        def __init__(self):
+            self.render_calls = 0
+            self.close_calls = 0
+
         def render(self, event, snapshot):
+            self.render_calls += 1
             raise OSError("closed")
 
         def close(self):
-            return
+            self.close_calls += 1
 
     class BrokenStore:
+        def __init__(self):
+            self.write_calls = 0
+
         def write(self, snapshot):
+            self.write_calls += 1
             raise OSError("disk full")
 
     controller = _controller("off", io.StringIO(), Clock())
-    controller._renderer = BrokenRenderer()  # type: ignore[reportPrivateUsage]
-    controller._store = BrokenStore()  # type: ignore[reportPrivateUsage]
+    renderer = BrokenRenderer()
+    store = BrokenStore()
+    controller._renderer = renderer  # type: ignore[reportPrivateUsage]
+    controller._store = store  # type: ignore[reportPrivateUsage]
     controller._bound = {  # type: ignore[reportPrivateUsage]
         "repository": "owner/repo",
         "pull_request": 7,
@@ -383,6 +426,15 @@ def test_renderer_and_store_failures_do_not_change_control_flow(tmp_path: Path):
     controller.phase(Phase.REGISTRY, State.SUCCEEDED, "registry succeeded")
     controller.finish(0)
     controller.close()
+
+    assert renderer.render_calls == 1
+    assert renderer.close_calls >= 1
+    assert store.write_calls == 1
+    assert controller._overall == {  # type: ignore[reportPrivateUsage]
+        "phase": "registry",
+        "state": "succeeded",
+    }
+    assert controller._final_exit_code == 0  # type: ignore[reportPrivateUsage]
 
 
 def test_snapshot_store_failure_emits_one_safe_json_diagnostic():

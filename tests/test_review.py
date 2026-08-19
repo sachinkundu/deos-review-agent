@@ -308,7 +308,7 @@ def test_run_review_agent_failure_surfaces_in_summary(tmp_path: Path, sample_dif
     assert "boom" in posted[0]["body"]
 
 
-def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff):
+def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff, capsys):
     pr = _make_pr(head_sha="abc123")
     posted = []
 
@@ -327,7 +327,14 @@ def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff):
         return StaleClient(creds, pr, sample_diff, posted)
 
     exit_code = run_review(
-        ["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)],
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
         client_factory=client_factory,
         runner_factory=_make_runner_factory(make_review(findings=[])),
         workspace_factory=lambda root, owner, repo, number, bootstrap_timeout=600: FakeWorkspace(
@@ -335,8 +342,24 @@ def test_run_review_stale_head_fails_without_post(tmp_path: Path, sample_diff):
         ),
         diff_artifact_writer=_fake_diff_artifact_writer,
     )
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     assert exit_code == 5
     assert posted == []
+    assert [
+        event["state"]
+        for event in events
+        if event["phase"] == "head-freshness" and event["message"] != "run finished"
+    ] == [
+        "running",
+        "failed",
+    ]
+    assert [
+        (event["phase"], event["state"])
+        for event in events
+        if event["phase"] in ("payload", "posting")
+    ] == [("payload", "skipped"), ("posting", "skipped")]
+    assert events[-1]["phase"] == "head-freshness"
+    assert events[-1]["state"] == "failed"
 
 
 def test_run_review_uses_registered_agent_inputs_even_when_filtered_diff_empty(
@@ -993,6 +1016,48 @@ def test_bootstrap_failure_skips_every_downstream_phase(tmp_path: Path, sample_d
         "posting",
         "cleanup",
     ]
+
+
+def test_bootstrap_timeout_settles_provider_diff_and_run_as_timed_out(
+    tmp_path: Path, sample_diff, capsys
+):
+    from review_bot.workspace import BootstrapResult
+
+    class TimedOutBootstrapWorkspace(FakeWorkspace):
+        def run_bootstrap(self, workdir: Path, extra_env=None):
+            return BootstrapResult(ran=True, ok=False, exit_code=None, output_tail="timed out")
+
+    workspace = TimedOutBootstrapWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert exit_code == 2
+    assert [
+        event["state"]
+        for event in events
+        if event["phase"] == "bootstrap" and event["message"] != "run finished"
+    ] == [
+        "running",
+        "timed-out",
+    ]
+    assert [event["state"] for event in events if event["phase"] == "provider-diff"] == [
+        "running",
+        "timed-out",
+    ]
+    assert events[-1]["phase"] == "bootstrap"
+    assert events[-1]["state"] == "timed-out"
 
 
 def test_successful_cleanup_restores_prior_failure_phase(tmp_path: Path, sample_diff, capsys):

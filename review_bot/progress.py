@@ -213,6 +213,7 @@ class RichProgressRenderer:
         monotonic_clock: Callable[[], float] = time.monotonic,
     ):
         self._lock = threading.RLock()
+        self._live_control_lock = threading.RLock()
         self._snapshot: dict[str, Any] | None = None
         self._event: dict[str, Any] | None = None
         self._monotonic_clock = monotonic_clock
@@ -229,13 +230,16 @@ class RichProgressRenderer:
         self._started = False
 
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
-        with self._lock:
-            self._event = dict(event)
-            self._snapshot = snapshot
-            self._snapshot_monotonic = self._monotonic_clock()
-            if not self._started:
+        with self._live_control_lock:
+            with self._lock:
+                self._event = dict(event)
+                self._snapshot = snapshot
+                self._snapshot_monotonic = self._monotonic_clock()
+                should_start = not self._started
+            if should_start:
                 self._live.start(refresh=True)
-                self._started = True
+                with self._lock:
+                    self._started = True
             else:
                 self._live.refresh()
 
@@ -302,14 +306,16 @@ class RichProgressRenderer:
         return table
 
     def diagnostic(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
-        with self._lock:
+        with self._live_control_lock:
             self._console.print(Text(str(event["message"]), style="bold yellow"))
 
     def close(self) -> None:
-        with self._lock:
-            if self._started:
-                self._live.stop()
+        with self._live_control_lock:
+            with self._lock:
+                should_stop = self._started
                 self._started = False
+            if should_stop:
+                self._live.stop()
 
 
 def create_renderer(mode: str, stream: IO[str] | None = None) -> ProgressRenderer:
