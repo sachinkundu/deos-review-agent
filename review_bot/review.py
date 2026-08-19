@@ -488,7 +488,6 @@ def _run_review_pipeline(
             _skip_phases(
                 progress,
                 (
-                    Phase.REGISTRY,
                     Phase.REVIEWERS,
                     Phase.COORDINATION,
                     Phase.SCHEMA_VALIDATION,
@@ -524,7 +523,6 @@ def _run_review_pipeline(
             _skip_phases(
                 progress,
                 (
-                    Phase.REGISTRY,
                     Phase.REVIEWERS,
                     Phase.COORDINATION,
                     Phase.SCHEMA_VALIDATION,

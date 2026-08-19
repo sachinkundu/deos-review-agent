@@ -984,7 +984,6 @@ def test_bootstrap_failure_skips_every_downstream_phase(tmp_path: Path, sample_d
         "failed",
     ]
     assert [event["phase"] for event in events if event["state"] == "skipped"] == [
-        "registry",
         "reviewers",
         "coordination",
         "schema-validation",
