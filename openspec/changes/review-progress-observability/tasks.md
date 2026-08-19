@@ -26,6 +26,6 @@
 
 ## 5. Real Exact-Head Proof and PR Evidence
 
-- [ ] 5.1 Run the implementation against a real pull request at its current head with the ignored environment file referenced in place, using no-post retained-workspace proof before any provider posting.
-- [ ] 5.2 Validate retained JSON events and `progress.json`, inspect status without mutation, and capture truthful terminal/status visual evidence with exact command, versions, target head, timestamps, and scope.
+- [x] 5.1 Run the implementation against a real pull request at its current head with the ignored environment file referenced in place, using no-post retained-workspace proof before any provider posting.
+- [x] 5.2 Validate retained JSON events and `progress.json`, inspect status without mutation, and capture truthful terminal/status visual evidence with exact command, versions, target head, timestamps, and scope.
 - [ ] 5.3 Attach deterministic and real-run evidence to the final ready-for-review implementation PR, verify the PR head and provider-visible evidence, and complete the checklist.

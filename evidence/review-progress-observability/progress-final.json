@@ -1,0 +1,66 @@
+{
+  "contract": "review-progress-snapshot/v1",
+  "run_id": "3daf0d4a96a449079f2e85b52ea6b7b3",
+  "repository": "sachinkundu/deos-review-agent",
+  "pull_request": 14,
+  "head_sha": "7d507cf2c647069c0490553c3edca105bb2bac91",
+  "mode": "dry-run",
+  "harness": "pi",
+  "max_concurrency": 4,
+  "overall": {
+    "phase": "posting",
+    "state": "skipped"
+  },
+  "started_at": "2026-08-19T10:30:29.653Z",
+  "updated_at": "2026-08-19T10:32:49.037Z",
+  "finished_at": "2026-08-19T10:32:49.036Z",
+  "reviewers": [
+    {
+      "name": "correctness",
+      "state": "succeeded",
+      "started_at": "2026-08-19T10:30:35.237Z",
+      "finished_at": "2026-08-19T10:32:01.345Z",
+      "elapsed_seconds": 86.107,
+      "timeout_seconds": 1800,
+      "error_summary": null
+    },
+    {
+      "name": "api-reality",
+      "state": "succeeded",
+      "started_at": "2026-08-19T10:30:35.238Z",
+      "finished_at": "2026-08-19T10:30:59.041Z",
+      "elapsed_seconds": 23.803,
+      "timeout_seconds": 1800,
+      "error_summary": null
+    },
+    {
+      "name": "tests",
+      "state": "succeeded",
+      "started_at": "2026-08-19T10:30:35.240Z",
+      "finished_at": "2026-08-19T10:31:04.758Z",
+      "elapsed_seconds": 29.517,
+      "timeout_seconds": 1800,
+      "error_summary": null
+    },
+    {
+      "name": "safety",
+      "state": "succeeded",
+      "started_at": "2026-08-19T10:30:35.239Z",
+      "finished_at": "2026-08-19T10:30:56.552Z",
+      "elapsed_seconds": 21.313,
+      "timeout_seconds": 1800,
+      "error_summary": null
+    }
+  ],
+  "coordinator": {
+    "name": "coordinator",
+    "state": "succeeded",
+    "started_at": "2026-08-19T10:32:01.417Z",
+    "finished_at": "2026-08-19T10:32:47.756Z",
+    "elapsed_seconds": 46.339,
+    "timeout_seconds": 1800,
+    "error_summary": null
+  },
+  "final_exit_code": 0,
+  "review_url": null
+}
