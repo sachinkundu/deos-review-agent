@@ -253,6 +253,17 @@ def test_timed_out_work_is_retained_with_safe_summaries(tmp_path: Path):
     controller.close()
 
 
+def test_finish_preserves_timed_out_aggregate_state(tmp_path: Path):
+    controller = _controller("off", io.StringIO(), Clock(), tmp_path)
+    controller.phase(Phase.BOOTSTRAP, State.TIMED_OUT, "repository bootstrap failed")
+    controller.finish(2)
+    controller.close()
+
+    snapshot = read_snapshot(tmp_path / "progress.json")
+    assert snapshot["overall"] == {"phase": "bootstrap", "state": "timed-out"}
+    assert snapshot["final_exit_code"] == 2
+
+
 def test_human_status_advances_elapsed_time_for_active_work(monkeypatch, tmp_path: Path):
     clock = Clock()
     controller = _controller("off", io.StringIO(), clock, tmp_path)

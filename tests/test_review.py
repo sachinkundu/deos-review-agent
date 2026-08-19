@@ -1096,6 +1096,7 @@ def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sampl
 
     snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
     assert exit_code == 4
+    assert snapshot["overall"] == {"phase": "coordination", "state": "timed-out"}
     assert snapshot["coordinator"]["state"] == "timed-out"
     assert snapshot["coordinator"]["error_summary"] == "coordinator timed out"
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
