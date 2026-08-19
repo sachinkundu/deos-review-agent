@@ -777,7 +777,7 @@ def read_snapshot(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ProgressError(f"progress snapshot not found: {path}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProgressError(f"progress snapshot is unreadable: {path}") from exc
     validate_snapshot(data)
     assert isinstance(data, dict)

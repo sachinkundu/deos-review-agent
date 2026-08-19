@@ -1293,6 +1293,21 @@ def test_status_missing_snapshot_is_a_read_only_error(tmp_path: Path, capsys):
     assert not (tmp_path / "owner-repo-pr7").exists()
 
 
+def test_status_invalid_utf8_snapshot_is_a_read_only_error(tmp_path: Path, capsys):
+    artifact_dir = tmp_path / "owner-repo-pr7" / "host-artifacts"
+    artifact_dir.mkdir(parents=True)
+    snapshot_path = artifact_dir / "progress.json"
+    snapshot_path.write_bytes(b"\xff")
+
+    assert (
+        run_status(["https://github.com/owner/repo/pull/7", "--workspace-root", str(tmp_path)]) == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "progress snapshot is unreadable" in captured.err
+    assert snapshot_path.read_bytes() == b"\xff"
+
+
 def test_handled_interrupt_retains_interrupted_state_and_reraises(tmp_path: Path, sample_diff):
     from review_bot.agents.runner import AgentResult, AgentRunner, AgentSpec
 
@@ -1356,6 +1371,36 @@ def test_interrupt_preserves_active_phase_through_cleanup(tmp_path: Path, sample
     assert events[-1]["state"] == "interrupted"
     assert "KeyboardInterrupt" not in captured.err
     assert workspace.removed is True
+
+
+def test_cleanup_interrupt_is_attributed_to_cleanup(tmp_path: Path, sample_diff, capsys):
+    class InterruptingRemovalWorkspace(FakeWorkspace):
+        def remove(self) -> None:
+            raise KeyboardInterrupt
+
+    workspace = InterruptingRemovalWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--dry-run",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert exit_code == 130
+    assert events[-1]["phase"] == "cleanup"
+    assert events[-1]["state"] == "interrupted"
+    assert snapshot["overall"] == {"phase": "cleanup", "state": "interrupted"}
+    assert snapshot["final_exit_code"] == 130
 
 
 def test_cleanup_failure_finalizes_surviving_snapshot(tmp_path: Path, sample_diff):

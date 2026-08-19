@@ -809,6 +809,7 @@ def _run_review_pipeline(
         print(f"review URL: {posted.get('html_url')}")
         return 0
     finally:
+        cleanup_started_normally = sys.exc_info()[0] is None
         if opts.keep_workspace:
             progress.phase(
                 Phase.CLEANUP,
@@ -821,7 +822,7 @@ def _run_review_pipeline(
                 Phase.CLEANUP,
                 State.RUNNING,
                 "workspace cleanup running",
-                update_overall=False,
+                update_overall=cleanup_started_normally,
             )
             try:
                 workspace.remove()

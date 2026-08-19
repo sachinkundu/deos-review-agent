@@ -248,6 +248,9 @@ def _run_agent_process(
         _terminate_processes([process])
         stdout, stderr = process.communicate()
         raise subprocess.TimeoutExpired(exc.cmd, exc.timeout, output=stdout, stderr=stderr) from exc
+    except BaseException:
+        _terminate_processes([process])
+        raise
     finally:
         unregister(process)
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)

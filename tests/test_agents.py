@@ -425,6 +425,33 @@ def test_registration_interrupt_terminates_new_process_before_propagating():
     assert unregistered == spawned
 
 
+def test_communicate_interrupt_terminates_process_before_unregistering(monkeypatch):
+    events: list[str] = []
+
+    class InterruptingProcess:
+        returncode = None
+
+        def communicate(self, **kwargs):
+            raise KeyboardInterrupt
+
+    process = InterruptingProcess()
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        runner_module,
+        "_terminate_processes",
+        lambda processes: events.append("terminate"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_module._run_agent_process(  # type: ignore[arg-type,reportPrivateUsage]
+            ["agent"],
+            register=lambda active: events.append("register"),
+            unregister=lambda active: events.append("unregister"),
+        )
+
+    assert events == ["register", "terminate", "unregister"]
+
+
 def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
     second_started = threading.Event()
     release_second = threading.Event()
