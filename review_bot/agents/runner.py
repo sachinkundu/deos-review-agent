@@ -12,13 +12,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..schema import SchemaError, load_schema, validate_review_output
 from .registry import AgentSkill, package_digest
@@ -119,11 +123,96 @@ class AgentSpec:
 class AgentRunner:
     """Interface for running one agent in a workspace directory."""
 
+    def __init__(self) -> None:
+        self._process_lock = threading.RLock()
+        self._active_processes: set[subprocess.Popen[str]] = set()
+
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         raise NotImplementedError
 
+    def _process_state(self) -> tuple[threading.RLock, set[subprocess.Popen[str]]]:
+        if not hasattr(self, "_process_lock"):
+            self._process_lock = threading.RLock()
+            self._active_processes = set()
+        return self._process_lock, self._active_processes
+
+    def _run_process(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        lock, processes = self._process_state()
+
+        def register(process: subprocess.Popen[str]) -> None:
+            with lock:
+                processes.add(process)
+
+        def unregister(process: subprocess.Popen[str]) -> None:
+            with lock:
+                processes.discard(process)
+
+        return _run_agent_process(cmd, register=register, unregister=unregister, **kwargs)
+
+    def interrupt(self) -> None:
+        """Terminate every in-flight agent process before interruption propagates."""
+        lock, processes = self._process_state()
+        with lock:
+            active = list(processes)
+        _terminate_processes(active)
+
     def close(self) -> None:
         """Optional cleanup hook (e.g. temporary schema directories)."""
+
+
+def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
+    active = [process for process in processes if process.poll() is None]
+    for process in active:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:  # pragma: no cover - Windows fallback
+                process.terminate()
+        except ProcessLookupError:
+            continue
+    deadline = time.monotonic() + 1.0
+    pending = [process for process in active if process.poll() is None]
+    while pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+        pending = [process for process in pending if process.poll() is None]
+    for process in pending:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:  # pragma: no cover - Windows fallback
+                process.kill()
+        except ProcessLookupError:
+            continue
+
+
+def _run_agent_process(
+    cmd: list[str],
+    *,
+    register: Callable[[subprocess.Popen[str]], None],
+    unregister: Callable[[subprocess.Popen[str]], None],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Run one tracked agent subprocess so Ctrl-C can terminate it promptly."""
+    input_value = kwargs.pop("input", None)
+    timeout = kwargs.pop("timeout", None)
+    capture_output = kwargs.pop("capture_output", False)
+    if capture_output:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if input_value is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    kwargs["start_new_session"] = os.name == "posix"
+    process = subprocess.Popen(cmd, **kwargs)
+    register(process)
+    try:
+        stdout, stderr = process.communicate(input=input_value, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_processes([process])
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(exc.cmd, exc.timeout, output=stdout, stderr=stderr) from exc
+    finally:
+        unregister(process)
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def run_agents_concurrently(
@@ -172,6 +261,8 @@ def run_agents_concurrently(
             results[futures[future]] = result
             _notify(on_settled, result)
     except KeyboardInterrupt:
+        with suppress(Exception):
+            runner.interrupt()
         for future in futures:
             future.cancel()
         pool.shutdown(wait=False, cancel_futures=True)
@@ -264,6 +355,7 @@ class CodexAgentRunner(AgentRunner):
         timeout: int = DEFAULT_AGENT_TIMEOUT,
         schema: dict | None = None,
     ):
+        super().__init__()
         self.command = command
         self.model = model
         self.timeout = timeout
@@ -273,6 +365,7 @@ class CodexAgentRunner(AgentRunner):
         self._schema_file.write_text(json.dumps(self._schema), encoding="utf-8")
 
     def close(self) -> None:
+        self.interrupt()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
@@ -315,7 +408,7 @@ class CodexAgentRunner(AgentRunner):
         )
 
         try:
-            proc = subprocess.run(
+            proc = self._run_process(
                 cmd,
                 input=prompt,
                 capture_output=True,
@@ -417,6 +510,7 @@ class PiAgentRunner(AgentRunner):
         timeout: int = DEFAULT_AGENT_TIMEOUT,
         persist_session: bool = True,
     ):
+        super().__init__()
         self.command = command
         self.model = model
         self.thinking = thinking
@@ -425,6 +519,7 @@ class PiAgentRunner(AgentRunner):
         self._tmpdir = Path(tempfile.mkdtemp(prefix="review-bot-agent-"))
 
     def close(self) -> None:
+        self.interrupt()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _run_once(self, spec: AgentSpec, prompt_file: Path, workdir: Path) -> AgentResult:
@@ -461,7 +556,7 @@ class PiAgentRunner(AgentRunner):
         cmd += [f"@{input_file}" for input_file in spec.input_files]
 
         try:
-            proc = subprocess.run(
+            proc = self._run_process(
                 cmd,
                 capture_output=True,
                 text=True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -217,6 +218,7 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
     first_started = threading.Event()
     release_first = threading.Event()
     second_started = threading.Event()
+    interrupt_called = threading.Event()
 
     class BlockingRunner(AgentRunner):
         def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
@@ -226,6 +228,10 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
             else:
                 second_started.set()
             return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+        def interrupt(self) -> None:
+            interrupt_called.set()
+            release_first.set()
 
     class InterruptingCompletionIterator:
         def __iter__(self):
@@ -248,11 +254,41 @@ def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monke
     try:
         with pytest.raises(KeyboardInterrupt):
             run_agents_concurrently(BlockingRunner(), invocations, max_concurrency=1)
+        assert interrupt_called.is_set()
         assert not second_started.is_set()
     finally:
         release_first.set()
     time.sleep(0.05)
     assert not second_started.is_set()
+
+
+def test_pi_interrupt_terminates_active_subprocess_promptly():
+    runner = PiAgentRunner(command="pi")
+    completed: list[subprocess.CompletedProcess[str]] = []
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            runner._run_process(  # type: ignore[reportPrivateUsage]
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if runner._active_processes:  # type: ignore[reportPrivateUsage]
+            break
+        time.sleep(0.01)
+    assert runner._active_processes  # type: ignore[reportPrivateUsage]
+
+    runner.interrupt()
+    thread.join(timeout=2)
+    runner.close()
+
+    assert not thread.is_alive()
+    assert completed[0].returncode != 0
 
 
 def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
@@ -364,7 +400,7 @@ def test_codex_runner_prompt_names_only_explicit_inputs(monkeypatch, tmp_path: P
         output_path.write_text(json.dumps(make_review(findings=[])))
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
         result = runner.run(
@@ -418,7 +454,7 @@ def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
         output_path.write_text(json.dumps(make_review(findings=[])))
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
         result = runner.run(AgentSpec("reviewer", "prompt", (), skills=(skill,)), capsule)
@@ -478,7 +514,7 @@ def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path)
             cmd, returncode=0, stdout=json.dumps(next(responses)), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", thinking="high")
     try:
         result = runner.run(
@@ -513,7 +549,7 @@ def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
             cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", persist_session=False)
     try:
         result = runner.run(
@@ -550,7 +586,7 @@ def test_pi_runner_passes_only_explicit_owned_skills(monkeypatch, tmp_path: Path
             cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", persist_session=False)
     try:
         result = runner.run(
@@ -632,7 +668,7 @@ def test_agent_runner_returns_failure_when_command_cannot_start(
     from review_bot.schema import load_schema
 
     monkeypatch.setattr(
-        "review_bot.agents.runner.subprocess.run",
+        "review_bot.agents.runner._run_agent_process",
         lambda cmd, **kwargs: (_ for _ in ()).throw(PermissionError("not executable")),
     )
     runner: AgentRunner
@@ -668,7 +704,7 @@ def test_codex_runner_returns_failure_for_unreadable_output(
             raise OSError("unreadable")
         return original_read_text(path, *args, **kwargs)
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     monkeypatch.setattr(Path, "read_text", fake_read_text)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
