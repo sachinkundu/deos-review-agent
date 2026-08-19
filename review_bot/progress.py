@@ -624,7 +624,10 @@ class ProgressController:
                     item.error_summary = "run stopped"
             self._final_exit_code = exit_code
             self._finished_at = format_utc(wall_now)
-            if self._overall["state"] not in (State.INTERRUPTED.value, State.SKIPPED.value):
+            if (
+                self._overall["state"] not in (State.INTERRUPTED.value, State.SKIPPED.value)
+                or exit_code != 0
+            ):
                 self._overall["state"] = (
                     State.SUCCEEDED.value if exit_code == 0 else State.FAILED.value
                 )

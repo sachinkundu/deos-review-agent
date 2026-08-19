@@ -173,6 +173,22 @@ def test_individual_settlement_does_not_claim_roster_success_early(tmp_path: Pat
     controller.close()
 
 
+def test_timed_out_work_is_retained_with_safe_summaries(tmp_path: Path):
+    controller = _controller("off", io.StringIO(), Clock(), tmp_path)
+    controller.reviewer_started("correctness", 30)
+    controller.reviewer_settled("correctness", ok=False, timed_out=True)
+    controller.coordinator_started()
+    controller.coordinator_settled(ok=False, timed_out=True)
+
+    snapshot = read_snapshot(tmp_path / "progress.json")
+    assert snapshot["reviewers"][0]["state"] == "timed-out"
+    assert snapshot["reviewers"][0]["error_summary"] == "reviewer timed out"
+    assert snapshot["coordinator"]["state"] == "timed-out"
+    assert snapshot["coordinator"]["error_summary"] == "coordinator timed out"
+    controller.finish(3)
+    controller.close()
+
+
 def test_human_status_advances_elapsed_time_for_active_work(monkeypatch, tmp_path: Path):
     clock = Clock()
     controller = _controller("off", io.StringIO(), clock, tmp_path)

@@ -620,6 +620,7 @@ def test_all_reviewer_failures_are_retained_and_later_phases_skipped(tmp_path: P
     assert [item["state"] for item in snapshot["reviewers"]] == ["failed"] * 4
     assert all(item["error_summary"] == "reviewer failed" for item in snapshot["reviewers"])
     assert snapshot["coordinator"]["state"] == "skipped"
+    assert snapshot["overall"]["state"] == "failed"
     assert "model secret" not in snapshot_text
     assert snapshot["final_exit_code"] == 3
 
