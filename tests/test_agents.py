@@ -174,6 +174,53 @@ def test_concurrent_callbacks_show_all_queued_then_immediate_settlement():
     assert [result.name for result in results] == ["first", "second"]
 
 
+def test_exceptional_future_settles_failed_before_waiting_for_active_peer():
+    both_started = threading.Barrier(2, timeout=2)
+    release_peer = threading.Event()
+    failed_settled = threading.Event()
+    events: list[tuple[str, str, bool, str | None]] = []
+    propagated: list[BaseException] = []
+
+    class ExceptionalRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            both_started.wait()
+            if spec.name == "failing":
+                raise OSError("prompt write exposed detail")
+            assert release_peer.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def settled(result: AgentResult) -> None:
+        events.append(("settled", result.name, result.ok, result.error))
+        if result.name == "failing":
+            failed_settled.set()
+
+    def invoke() -> None:
+        try:
+            run_agents_concurrently(
+                ExceptionalRunner(),
+                [
+                    (AgentSpec("failing", "prompt", ()), Path("/tmp/failing")),
+                    (AgentSpec("peer", "prompt", ()), Path("/tmp/peer")),
+                ],
+                max_concurrency=2,
+                on_settled=settled,
+            )
+        except BaseException as exc:
+            propagated.append(exc)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert failed_settled.wait(timeout=2)
+    assert thread.is_alive()
+    assert events == [("settled", "failing", False, "reviewer invocation failed")]
+    release_peer.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert isinstance(propagated[0], OSError)
+    assert events[-1] == ("settled", "peer", True, None)
+
+
 def test_waiting_reviewers_remain_queued_until_worker_is_available():
     first_started = threading.Event()
     release_first = threading.Event()
@@ -370,7 +417,7 @@ def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
     assert not thread.is_alive()
     assert len(captured) == 1
     assert isinstance(captured[0], OSError)
-    assert settled == ["second"]
+    assert settled == ["first", "second"]
 
 
 def test_progress_callback_failures_do_not_change_agent_results():

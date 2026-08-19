@@ -260,12 +260,26 @@ def run_agents_concurrently(
     futures: dict[Future[AgentResult], int] = {}
     settled: set[Future[AgentResult]] = set()
 
+    def _failed_result(index: int) -> AgentResult:
+        spec, _workdir = invocations[index]
+        return AgentResult(
+            name=spec.name,
+            ok=False,
+            contract_version=spec.contract_version,
+            package_digest=spec.package_digest,
+            error="reviewer invocation failed",
+        )
+
     def _settle_completed() -> None:
         for future, index in futures.items():
             if future in settled or not future.done() or future.cancelled():
                 continue
             try:
                 result = future.result()
+            except Exception:
+                settled.add(future)
+                _notify(on_settled, _failed_result(index))
+                continue
             except BaseException:
                 continue
             results[index] = result
@@ -277,7 +291,12 @@ def run_agents_concurrently(
             pool.submit(_one, invocation): index for index, invocation in enumerate(invocations)
         }
         for future in as_completed(futures):
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception:
+                settled.add(future)
+                _notify(on_settled, _failed_result(futures[future]))
+                raise
             results[futures[future]] = result
             settled.add(future)
             _notify(on_settled, result)
