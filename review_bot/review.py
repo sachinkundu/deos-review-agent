@@ -312,20 +312,27 @@ def run_review(
     diagnostics = redirect_stderr(sys.stdout) if args.progress == "json" else nullcontext()
     try:
         with diagnostics:
-            return _run_review_pipeline(
-                args,
-                progress,
-                client_factory=client_factory,
-                runner_factory=runner_factory,
-                workspace_factory=workspace_factory,
-                diff_artifact_writer=diff_artifact_writer,
-            )
-    except KeyboardInterrupt:
-        progress.interrupt()
-        raise
-    except Exception:
-        progress.finish(1)
-        raise
+            try:
+                return _run_review_pipeline(
+                    args,
+                    progress,
+                    client_factory=client_factory,
+                    runner_factory=runner_factory,
+                    workspace_factory=workspace_factory,
+                    diff_artifact_writer=diff_artifact_writer,
+                )
+            except KeyboardInterrupt:
+                progress.interrupt()
+                raise
+            except Exception as exc:
+                progress.finish(1)
+                if args.progress == "json":
+                    print(
+                        f"error: unexpected failure: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                raise
     finally:
         progress.close()
 
@@ -367,6 +374,10 @@ def _run_review_pipeline(
     if opts.max_agent_concurrency < 1:
         progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
         print("error: max agent concurrency must be at least 1", file=sys.stderr)
+        return _finish(progress, 1)
+    if opts.agent_timeout < 0:
+        progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
+        print("error: agent timeout must be non-negative", file=sys.stderr)
         return _finish(progress, 1)
     workspace = workspace_factory(
         opts.workspace_root, owner, repo, number, bootstrap_timeout=opts.bootstrap_timeout
@@ -682,10 +693,24 @@ def _run_review_pipeline(
                 update_overall=False,
             )
         else:
-            progress.phase(Phase.CLEANUP, State.RUNNING, "workspace cleanup running")
+            progress.phase(
+                Phase.CLEANUP,
+                State.RUNNING,
+                "workspace cleanup running",
+                update_overall=False,
+            )
+            try:
+                workspace.remove()
+            except Exception:
+                progress.phase(Phase.CLEANUP, State.FAILED, "workspace cleanup failed")
+                raise
+            progress.phase(
+                Phase.CLEANUP,
+                State.SUCCEEDED,
+                "workspace cleanup succeeded",
+                update_overall=False,
+            )
             progress.detach_store()
-            workspace.remove()
-            progress.phase(Phase.CLEANUP, State.SUCCEEDED, "workspace cleanup succeeded")
 
 
 def run_cleanup(

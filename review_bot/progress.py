@@ -220,6 +220,12 @@ class RichProgressRenderer:
             elapsed += max(0.0, self._monotonic_clock() - self._snapshot_monotonic)
         return elapsed
 
+    def _live_pipeline_elapsed(self, event: dict[str, Any], state: str) -> float:
+        elapsed = float(event.get("elapsed_seconds", 0.0))
+        if state == State.RUNNING.value:
+            elapsed += max(0.0, self._monotonic_clock() - self._snapshot_monotonic)
+        return elapsed
+
     def build_table(self) -> Table:
         with self._lock:
             event = dict(self._event or {})
@@ -236,7 +242,7 @@ class RichProgressRenderer:
             table.add_row(
                 str(overall["phase"]),
                 Text(state, style=self._STYLES.get(state, "")),
-                f"{float(event.get('elapsed_seconds', 0.0)):.1f}s",
+                f"{self._live_pipeline_elapsed(event, state):.1f}s",
                 "—",
             )
             items = list(snapshot["reviewers"])
@@ -665,23 +671,22 @@ class ProgressController:
                 self._overall["state"] = (
                     State.SUCCEEDED.value if exit_code == 0 else State.FAILED.value
                 )
-            snapshot = self._snapshot(wall_now, mono_now)
-            if self._store is not None and self._store_healthy and snapshot is not None:
-                try:
-                    self._store.write(snapshot)
-                except (OSError, ProgressError):
-                    self._store_healthy = False
+            phase = Phase(self._overall["phase"])
+            state = State(self._overall["state"])
+        self._publish(phase, state, "run finished", update_overall=False)
 
     def interrupt(self) -> None:
         with self._lock:
             wall_now, mono_now = self._now()
             for item in [*self._reviewers, self._coordinator]:
-                if item is not None and item.state == State.RUNNING:
-                    item.state = State.INTERRUPTED
+                if item is not None and item.state in (State.RUNNING, State.QUEUED):
+                    was_running = item.state == State.RUNNING
+                    item.state = State.INTERRUPTED if was_running else State.SKIPPED
                     item.finished_at = format_utc(wall_now)
                     if item.started_monotonic is not None:
                         item.elapsed_seconds = max(0.0, mono_now - item.started_monotonic)
-                    item.error_summary = "interrupted"
+                    if was_running:
+                        item.error_summary = "interrupted"
             self._finished_at = format_utc(wall_now)
         phase = Phase(self._overall["phase"])
         self._publish(phase, State.INTERRUPTED, "run interrupted")

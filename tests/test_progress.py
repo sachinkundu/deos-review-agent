@@ -147,6 +147,12 @@ def test_rich_live_elapsed_advances_only_from_monotonic_time(monkeypatch):
     monotonic[0] += 7.0
     try:
         assert renderer._live_elapsed(item) == 12.0  # type: ignore[reportPrivateUsage]
+        assert (
+            renderer._live_pipeline_elapsed(  # type: ignore[reportPrivateUsage]
+                {"elapsed_seconds": 5.0}, "running"
+            )
+            == 12.0
+        )
     finally:
         renderer.close()
 
@@ -294,6 +300,19 @@ def test_progress_uses_safe_failure_class_not_agent_error(tmp_path: Path):
     assert sentinel not in stream.getvalue()
     assert sentinel not in (tmp_path / "progress.json").read_text()
     assert "reviewer failed" in stream.getvalue()
+
+
+def test_finish_publishes_terminal_failure_event(tmp_path: Path):
+    stream = io.StringIO()
+    controller = _controller("json", stream, Clock(), tmp_path)
+    controller.phase(Phase.REVIEWERS, State.FAILED, "all reviewers failed")
+    controller.finish(3)
+    controller.close()
+
+    events = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert events[-1]["phase"] == "reviewers"
+    assert events[-1]["state"] == "failed"
+    assert events[-1]["message"] == "run finished"
 
 
 def test_renderer_and_store_failures_do_not_change_control_flow(tmp_path: Path):

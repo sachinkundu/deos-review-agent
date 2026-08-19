@@ -585,6 +585,30 @@ def test_invalid_progress_fails_before_registry_credentials_or_provider(
     assert called == []
 
 
+def test_negative_agent_timeout_fails_before_provider_work(tmp_path: Path):
+    provider_calls: list[str] = []
+
+    class UnusedClient(FakeGitHubClient):
+        def mint_app_jwt(self):
+            provider_calls.append("mint")
+            return super().mint_app_jwt()
+
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--agent-timeout",
+            "-1",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=lambda creds: UnusedClient(creds, _make_pr(), "", []),
+    )
+
+    assert exit_code == 1
+    assert provider_calls == []
+    assert not (tmp_path / "owner-repo-pr7").exists()
+
+
 def test_bot_skip_reports_every_inapplicable_phase(tmp_path: Path, capsys):
     exit_code = run_review(
         [
@@ -677,6 +701,34 @@ def test_unexpected_exception_finalizes_retained_progress(tmp_path: Path, sample
     assert snapshot["overall"] == {"phase": "provider-diff", "state": "failed"}
     assert snapshot["finished_at"] is not None
     assert snapshot["final_exit_code"] == 1
+
+
+def test_json_unexpected_exception_keeps_stderr_jsonl(tmp_path: Path, sample_diff, capsys):
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+
+    def broken_writer(workdir: Path, diff_text: str):
+        raise OSError("disk unavailable")
+
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=broken_writer,
+    )
+    captured = capsys.readouterr()
+
+    events = [json.loads(line) for line in captured.err.splitlines()]
+    assert exit_code == 1
+    assert events[-1]["state"] == "failed"
+    assert "unexpected failure: OSError" in captured.out
+    assert "Traceback" not in captured.err
 
 
 def test_schema_failure_finalizes_retained_progress(tmp_path: Path, sample_diff):
@@ -948,7 +1000,64 @@ def test_handled_interrupt_retains_interrupted_state_and_reraises(tmp_path: Path
     snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
     assert snapshot["overall"]["state"] == "interrupted"
     assert any(item["state"] == "interrupted" for item in snapshot["reviewers"])
+    assert all(item["state"] != "queued" for item in snapshot["reviewers"])
     assert workspace.removed is False
+
+
+def test_interrupt_preserves_active_phase_through_cleanup(tmp_path: Path, sample_diff, capsys):
+    from review_bot.agents.runner import AgentResult, AgentRunner, AgentSpec
+
+    class InterruptingRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "correctness":
+                raise KeyboardInterrupt
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    with pytest.raises(KeyboardInterrupt):
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                "--progress",
+                "json",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+            runner_factory=lambda **kwargs: InterruptingRunner(),
+            workspace_factory=lambda *args, **kwargs: workspace,
+            diff_artifact_writer=_fake_diff_artifact_writer,
+        )
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert events[-1]["phase"] == "reviewers"
+    assert events[-1]["state"] == "interrupted"
+    assert workspace.removed is True
+
+
+def test_cleanup_failure_finalizes_surviving_snapshot(tmp_path: Path, sample_diff):
+    class FailingRemovalWorkspace(FakeWorkspace):
+        def remove(self) -> None:
+            raise OSError("permission denied")
+
+    workspace = FailingRemovalWorkspace(tmp_path, "owner", "repo", 7)
+    with pytest.raises(OSError, match="permission denied"):
+        run_review(
+            [
+                "https://github.com/owner/repo/pull/7",
+                "--dry-run",
+                "--progress",
+                "off",
+                "--workspace-root",
+                str(tmp_path),
+            ],
+            client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+            runner_factory=_make_runner_factory(make_review(findings=[])),
+            workspace_factory=lambda *args, **kwargs: workspace,
+            diff_artifact_writer=_fake_diff_artifact_writer,
+        )
+    snapshot = json.loads((workspace.artifact_dir / "progress.json").read_text())
+    assert snapshot["overall"] == {"phase": "cleanup", "state": "failed"}
+    assert snapshot["final_exit_code"] == 1
 
 
 def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff):

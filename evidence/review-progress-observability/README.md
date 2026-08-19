@@ -17,7 +17,10 @@ Verified on 2026-08-19 (Europe/Helsinki) with implementation commit
 - **Visual proof:** `github-pr14-exact-head.jpg` shows the real draft fixture PR,
   one commit, branch identity, and short head `7d507cf` in GitHub's UI;
   `status-terminal.jpg` shows the provider-free retained-status command with all
-  reviewers and the coordinator succeeded, posting skipped, and exit `0`.
+  reviewers and the coordinator succeeded, posting skipped, and exit `0`;
+  `github-app-installation.jpg` shows the signed-in GitHub Applications page
+  with `deos-review-agent` installed. No private key, token, or other credential
+  material is shown.
 
 ## Real run
 
@@ -89,7 +92,7 @@ cc901155757cee0f46c5967834d38e20f45d2ca50a3a6daf4ae4cd837a7d121e
 ## Deterministic gates
 
 ```text
-uv run pytest                                      192 passed
+uv run pytest                                      210 passed
 uv run ruff format --check review_bot tests        41 files formatted
 uv run ruff check review_bot tests                 passed
 uv run pyright review_bot tests                    0 errors
@@ -102,4 +105,7 @@ wheel resource inspection                         progress schema present
 The first live run exposed two truthfulness defects before evidence acceptance:
 premature aggregate reviewer success and stale active elapsed time in human
 status. Commit `7fcd883` fixed both, added regressions, and the clean run above
-is the rerun after those fixes.
+is the rerun after those fixes. Subsequent GitHub review feedback added coverage
+for terminal event publication, interrupted queued reviewers, cleanup failures,
+JSON-stream purity, negative timeouts, and interrupt cleanup ordering; the full
+210-test gate above includes those regressions.
