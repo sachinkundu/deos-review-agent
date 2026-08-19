@@ -632,18 +632,20 @@ class ProgressController:
     def reviewer_started(self, name: str, timeout_seconds: float) -> None:
         with self._lock:
             item = self._reviewers_by_name[name]
+            if self._finished_at is not None or item.state in TERMINAL_STATES:
+                return
             wall_now, mono_now = self._now()
             item.state = State.RUNNING
             item.started_at = format_utc(wall_now)
             item.started_monotonic = mono_now
-        self._publish(
-            Phase.REVIEWERS,
-            State.RUNNING,
-            "reviewer running",
-            subject=name,
-            timeout_seconds=timeout_seconds,
-            update_overall=False,
-        )
+            self._publish(
+                Phase.REVIEWERS,
+                State.RUNNING,
+                "reviewer running",
+                subject=name,
+                timeout_seconds=timeout_seconds,
+                update_overall=False,
+            )
 
     def reviewer_settled(self, name: str, ok: bool, timed_out: bool = False) -> None:
         state = State.SUCCEEDED if ok else State.TIMED_OUT if timed_out else State.FAILED

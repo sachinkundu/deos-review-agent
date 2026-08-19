@@ -220,6 +220,23 @@ def test_individual_settlement_does_not_claim_roster_success_early(tmp_path: Pat
     controller.close()
 
 
+def test_late_reviewer_start_cannot_reopen_interrupted_run(tmp_path: Path):
+    controller = _controller("off", io.StringIO(), Clock(), tmp_path)
+    controller.phase(Phase.REVIEWERS, State.RUNNING, "reviewer roster running")
+    controller.interrupt()
+    path = tmp_path / "progress.json"
+    before = path.read_bytes()
+
+    controller.reviewer_started("correctness", 30)
+
+    snapshot = read_snapshot(path)
+    assert path.read_bytes() == before
+    assert snapshot["overall"] == {"phase": "reviewers", "state": "interrupted"}
+    assert snapshot["reviewers"][0]["state"] == "skipped"
+    assert snapshot["final_exit_code"] == 130
+    controller.close()
+
+
 def test_timed_out_work_is_retained_with_safe_summaries(tmp_path: Path):
     controller = _controller("off", io.StringIO(), Clock(), tmp_path)
     controller.reviewer_started("correctness", 30)

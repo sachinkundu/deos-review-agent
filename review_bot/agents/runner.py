@@ -168,12 +168,38 @@ class AgentRunner:
 
 def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
     active = [process for process in processes if process.poll() is None]
+    if os.name == "posix":
+        process_groups = [process.pid for process in active]
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+        deadline = time.monotonic() + 1.0
+        pending = process_groups
+        while pending and time.monotonic() < deadline:
+            time.sleep(0.01)
+            live: list[int] = []
+            for process_group in pending:
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    live.append(process_group)
+                    continue
+                live.append(process_group)
+            pending = live
+        for process_group in pending:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                continue
+        return
+
     for process in active:
         try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:  # pragma: no cover - Windows fallback
-                process.terminate()
+            process.terminate()  # pragma: no cover - Windows fallback
         except ProcessLookupError:
             continue
     deadline = time.monotonic() + 1.0
@@ -183,10 +209,7 @@ def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
         pending = [process for process in pending if process.poll() is None]
     for process in pending:
         try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:  # pragma: no cover - Windows fallback
-                process.kill()
+            process.kill()  # pragma: no cover - Windows fallback
         except ProcessLookupError:
             continue
 
