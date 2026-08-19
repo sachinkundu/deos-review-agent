@@ -132,13 +132,27 @@ class PlainProgressRenderer:
     def __init__(self, stream: IO[str]):
         self.stream = stream
 
+    @staticmethod
+    def _elapsed_seconds(event: dict[str, Any], snapshot: dict[str, Any] | None) -> float:
+        subject = event.get("subject")
+        if subject and snapshot is not None:
+            items = [*snapshot.get("reviewers", [])]
+            coordinator = snapshot.get("coordinator")
+            if coordinator is not None:
+                items.append(coordinator)
+            for item in items:
+                if item.get("name") == subject:
+                    return float(item.get("elapsed_seconds", 0.0))
+        return float(event["elapsed_seconds"])
+
     def render(self, event: dict[str, Any], snapshot: dict[str, Any] | None) -> None:
         subject = f"/{event['subject']}" if event.get("subject") else ""
         timeout = f" timeout={event['timeout_seconds']}s" if "timeout_seconds" in event else ""
+        elapsed = self._elapsed_seconds(event, snapshot)
         self.stream.write(
             f"{event['recorded_at']} #{event['sequence']:03d} "
             f"{event['phase']}{subject} {event['state']} "
-            f"elapsed={event['elapsed_seconds']}s{timeout} {event['message']}\n"
+            f"elapsed={elapsed}s{timeout} {event['message']}\n"
         )
         self.stream.flush()
 

@@ -95,6 +95,9 @@ def test_plain_events_are_stable_lines_without_terminal_controls(tmp_path: Path)
     stream = io.StringIO()
     clock = Clock()
     controller = _controller("plain", stream, clock, tmp_path)
+    controller.phase(Phase.CREDENTIALS, State.RUNNING, "provider authentication running")
+    clock.advance(90)
+    controller.phase(Phase.CREDENTIALS, State.SUCCEEDED, "provider authentication succeeded")
     controller.reviewer_queued("correctness", 30)
     controller.reviewer_started("correctness", 30)
     clock.advance(2)
@@ -102,9 +105,11 @@ def test_plain_events_are_stable_lines_without_terminal_controls(tmp_path: Path)
     controller.close()
 
     lines = stream.getvalue().splitlines()
-    assert len(lines) == 3
-    assert "reviewers/correctness queued" in lines[0]
+    assert len(lines) == 5
+    assert "reviewers/correctness queued" in lines[2]
+    assert "elapsed=0.0s" in lines[2]
     assert "elapsed=2.0s" in lines[-1]
+    assert "elapsed=92.0s" not in lines[-1]
     assert "\x1b" not in stream.getvalue()
 
 
