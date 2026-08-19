@@ -233,7 +233,15 @@ def _run_agent_process(
         kwargs["stdin"] = subprocess.PIPE
     kwargs["start_new_session"] = os.name == "posix"
     process = subprocess.Popen(cmd, **kwargs)
-    register(process)
+    try:
+        register(process)
+    except BaseException:
+        try:
+            _terminate_processes([process])
+        finally:
+            with suppress(Exception):
+                unregister(process)
+        raise
     try:
         stdout, stderr = process.communicate(input=input_value, timeout=timeout)
     except subprocess.TimeoutExpired as exc:

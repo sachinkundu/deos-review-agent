@@ -623,6 +623,18 @@ def _run_review_pipeline(
                 progress.coordinator_settled(
                     ok=False, timed_out=isinstance(e, CoordinatorError) and e.timed_out
                 )
+                _skip_phases(
+                    progress,
+                    (
+                        Phase.SCHEMA_VALIDATION,
+                        Phase.DIFF_VALIDATION,
+                        Phase.HEAD_FRESHNESS,
+                        Phase.PAYLOAD,
+                        Phase.POSTING,
+                    ),
+                    "coordinator result unavailable",
+                    update_overall=False,
+                )
                 print(f"error: {e}", file=sys.stderr)
                 return 4
         except (HarnessError, ResourceError, RegistryError) as e:

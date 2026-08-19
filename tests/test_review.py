@@ -952,7 +952,7 @@ def test_reviewer_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_d
     assert snapshot["reviewers"][0]["error_summary"] == "reviewer timed out"
 
 
-def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff):
+def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sample_diff, capsys):
     final = make_review(findings=[], overall_correctness="patch is correct")
     workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
     runner = FakeAgentRunner(
@@ -974,7 +974,7 @@ def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sampl
             "https://github.com/owner/repo/pull/7",
             "--keep-workspace",
             "--progress",
-            "off",
+            "json",
             "--workspace-root",
             str(tmp_path),
         ],
@@ -988,6 +988,14 @@ def test_coordinator_timeout_wiring_is_retained_end_to_end(tmp_path: Path, sampl
     assert exit_code == 4
     assert snapshot["coordinator"]["state"] == "timed-out"
     assert snapshot["coordinator"]["error_summary"] == "coordinator timed out"
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert [
+        event["phase"]
+        for event in events
+        if event["state"] == "skipped"
+        and event["phase"]
+        in {"schema-validation", "diff-validation", "head-freshness", "payload", "posting"}
+    ] == ["schema-validation", "diff-validation", "head-freshness", "payload", "posting"]
 
 
 def test_timeout_words_without_structured_outcome_remain_failures(tmp_path: Path, sample_diff):

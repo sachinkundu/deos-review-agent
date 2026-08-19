@@ -401,6 +401,30 @@ def test_process_registered_during_interrupt_is_terminated(monkeypatch):
     assert completed[0].returncode != 0
 
 
+def test_registration_interrupt_terminates_new_process_before_propagating():
+    spawned: list[subprocess.Popen[str]] = []
+    unregistered: list[subprocess.Popen[str]] = []
+
+    def interrupt_registration(process: subprocess.Popen[str]) -> None:
+        spawned.append(process)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_module._run_agent_process(  # type: ignore[reportPrivateUsage]
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            register=interrupt_registration,
+            unregister=unregistered.append,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert len(spawned) == 1
+    spawned[0].wait(timeout=2)
+    assert spawned[0].returncode != 0
+    assert unregistered == spawned
+
+
 def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
     second_started = threading.Event()
     release_second = threading.Event()
