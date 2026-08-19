@@ -450,6 +450,7 @@ def _run_review_pipeline(
         progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
+    provider_diff_settled = False
     try:
         progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
         try:
@@ -519,6 +520,7 @@ def _run_review_pipeline(
             write_shared_context(workspace.artifact_dir, pr, bootstrap)
         except DiffFilterError as e:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
+            provider_diff_settled = True
             _skip_phases(
                 progress,
                 (
@@ -538,8 +540,10 @@ def _run_review_pipeline(
             return 2
         except OSError:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact persistence failed")
+            provider_diff_settled = True
             raise
         progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "diff artifacts ready")
+        provider_diff_settled = True
 
         progress.phase(Phase.REVIEWERS, State.RUNNING, "review harness setup running")
         try:
@@ -806,7 +810,23 @@ def _run_review_pipeline(
         print(f"review URL: {posted.get('html_url')}")
         return 0
     finally:
-        cleanup_started_normally = sys.exc_info()[0] is None
+        active_exception = sys.exc_info()[0]
+        if not provider_diff_settled:
+            _active_phase, active_state = progress.current_overall()
+            provider_diff_state = (
+                State.INTERRUPTED
+                if active_exception is KeyboardInterrupt
+                else State.TIMED_OUT
+                if active_state == State.TIMED_OUT
+                else State.FAILED
+            )
+            progress.phase(
+                Phase.PROVIDER_DIFF,
+                provider_diff_state,
+                "diff artifact construction aborted",
+                update_overall=False,
+            )
+        cleanup_started_normally = active_exception is None
         prior_overall = progress.current_overall()
         if opts.keep_workspace:
             progress.phase(

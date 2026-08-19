@@ -523,6 +523,36 @@ def test_run_review_artifact_failure_stops_before_agents(tmp_path: Path, sample_
     assert posted == []
 
 
+def test_workspace_failure_settles_active_provider_diff(tmp_path: Path, sample_diff, capsys):
+    from review_bot.workspace import WorkspaceError
+
+    class FailingSetupWorkspace(FakeWorkspace):
+        def setup(self, clone_url: str, head_sha: str, branch: str, token: str) -> Path:
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            raise WorkspaceError("clone failed")
+
+    workspace = FailingSetupWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "json",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=_make_client_factory(_make_pr(), sample_diff, []),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    provider_diff_states = [event["state"] for event in events if event["phase"] == "provider-diff"]
+    assert exit_code == 2
+    assert provider_diff_states == ["running", "failed"]
+    assert events[-1]["phase"] == "workspace"
+    assert events[-1]["state"] == "failed"
+
+
 @pytest.mark.parametrize(("keep", "removed"), [(False, True), (True, False)])
 def test_run_review_workspace_cleanup_and_artifact_retention(
     tmp_path: Path, sample_diff, keep: bool, removed: bool, capsys
@@ -949,6 +979,10 @@ def test_bootstrap_failure_skips_every_downstream_phase(tmp_path: Path, sample_d
 
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     assert exit_code == 2
+    assert [event["state"] for event in events if event["phase"] == "provider-diff"] == [
+        "running",
+        "failed",
+    ]
     assert [event["phase"] for event in events if event["state"] == "skipped"] == [
         "registry",
         "reviewers",
