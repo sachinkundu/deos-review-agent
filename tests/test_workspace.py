@@ -187,3 +187,16 @@ def test_remove_cleans_workspace(local_clone_url, head_sha, workspace):
     assert workspace.workdir.exists()
     workspace.remove()
     assert not workspace.workdir.exists()
+
+
+def test_remove_surfaces_filesystem_failure(workspace, monkeypatch):
+    workspace.workdir.mkdir(parents=True)
+
+    def fail_remove(path: Path) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("review_bot.workspace.shutil.rmtree", fail_remove)
+    with pytest.raises(OSError, match="permission denied"):
+        workspace.remove()
+
+    assert workspace.workdir.exists()

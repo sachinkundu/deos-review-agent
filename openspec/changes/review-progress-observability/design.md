@@ -144,8 +144,12 @@ when stderr is a TTY; all renderers receive the same event and snapshot state.
 Rich is added as an explicit runtime dependency. Its `Live` display renders a
 pipeline line and registry-ordered work table, refreshes active elapsed values
 from monotonic time, respects `NO_COLOR`, and is stopped in a controller
-finalizer. Plain and JSON modes write and flush exactly one transition per
-line. New progress never writes to stdout.
+finalizer. The work table renders the reviewer roster as tree children beneath
+an aggregate `reviewers` row and the coordinator beneath a separate
+`coordination` row. When another phase is current, settled work retains its own
+parent row so indentation never implies the wrong parent. Plain and JSON modes
+write and flush exactly one transition per line. New progress never writes to
+stdout.
 
 Alternatives considered:
 

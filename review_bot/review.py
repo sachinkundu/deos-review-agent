@@ -2,6 +2,7 @@
 
 Usage:
     review-bot <PR_URL> [--dry-run] [--keep-workspace] [--no-agent-session] [options]
+    review-bot status <PR_URL> [--workspace-root PATH] [--json]
     review-bot cleanup <PR_URL>
 
 Flow: load credentials -> mint installation token (one per run) -> fetch PR
@@ -19,6 +20,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from contextlib import nullcontext, redirect_stderr
 from pathlib import Path
 
 from . import __version__
@@ -54,6 +56,15 @@ from .github import (
     event_for_findings,
     parse_pr_url,
 )
+from .progress import (
+    SNAPSHOT_NAME,
+    Phase,
+    ProgressController,
+    ProgressError,
+    State,
+    format_status,
+    read_snapshot,
+)
 from .resources import (
     ResourceError,
     ResourceResolver,
@@ -62,7 +73,12 @@ from .resources import (
 )
 from .schema import SchemaError, validate_review_output
 from .shared_context import write_shared_context
-from .workspace import DEFAULT_BOOTSTRAP_TIMEOUT, PRWorkspace, WorkspaceError
+from .workspace import (
+    DEFAULT_BOOTSTRAP_TIMEOUT,
+    PRWorkspace,
+    WorkspaceError,
+    workspace_dir_for,
+)
 
 DEFAULT_WORKSPACE_ROOT = Path.home() / "review-bot-workspaces"
 UNPOSTED_REVIEW_NAME = "unposted-review.json"
@@ -224,14 +240,10 @@ def build_agent_runner(
     raise HarnessError(f"unsupported review harness command: {command!r}")
 
 
-def run_review(
-    argv: list[str],
-    client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
-    runner_factory: Callable[..., AgentRunner] = build_agent_runner,
-    workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
-    diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
-) -> int:
-    parser = argparse.ArgumentParser(prog="review-bot", description="Review a GitHub PR (Phase 2).")
+def _review_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="review-bot", description="Review a GitHub PR (Phase 2).", allow_abbrev=False
+    )
     parser.add_argument("--version", action="version", version=f"review-bot {__version__}")
     parser.add_argument("pr_url", help="GitHub pull request URL")
     parser.add_argument(
@@ -265,30 +277,123 @@ def run_review(
         default=None,
         help=f"maximum concurrent reviewers (default: {DEFAULT_MAX_CONCURRENCY})",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "plain", "json", "off"),
+        default="auto",
+        help="progress presentation on stderr (default: auto)",
+    )
+    return parser
 
+
+def _json_progress_requested(argv: list[str]) -> bool:
+    return any(
+        argument == "--progress=json"
+        or (argument == "--progress" and index + 1 < len(argv) and argv[index + 1] == "json")
+        for index, argument in enumerate(argv)
+    )
+
+
+def _skip_phases(
+    progress: ProgressController,
+    phases: tuple[Phase, ...],
+    message: str,
+    *,
+    update_overall: bool = True,
+) -> None:
+    for phase in phases:
+        progress.phase(phase, State.SKIPPED, message, update_overall=update_overall)
+
+
+def run_review(
+    argv: list[str],
+    client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
+    runner_factory: Callable[..., AgentRunner] = build_agent_runner,
+    workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
+    diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
+) -> int:
+    parse_diagnostics = (
+        redirect_stderr(sys.stdout) if _json_progress_requested(argv) else nullcontext()
+    )
+    with parse_diagnostics:
+        args = _review_parser().parse_args(argv)
     try:
-        owner, repo, number = parse_pr_url(args.pr_url)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
+        target = parse_pr_url(args.pr_url)
+    except ValueError as exc:
+        destination = sys.stdout if args.progress == "json" else sys.stderr
+        print(f"error: {exc}", file=destination)
         return 1
+    progress = ProgressController(args.progress)
+    diagnostics = redirect_stderr(sys.stdout) if args.progress == "json" else nullcontext()
+    try:
+        with diagnostics:
+            try:
+                exit_code = _run_review_pipeline(
+                    args,
+                    progress,
+                    target,
+                    client_factory=client_factory,
+                    runner_factory=runner_factory,
+                    workspace_factory=workspace_factory,
+                    diff_artifact_writer=diff_artifact_writer,
+                )
+                progress.finish(exit_code)
+                return exit_code
+            except KeyboardInterrupt:
+                progress.interrupt()
+                if args.progress == "json":
+                    return 130
+                raise
+            except Exception as exc:
+                progress.finish(1)
+                if args.progress == "json":
+                    print(
+                        f"error: unexpected failure: {type(exc).__name__}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                raise
+    finally:
+        progress.close()
 
+
+def _run_review_pipeline(
+    args: argparse.Namespace,
+    progress: ProgressController,
+    target: tuple[str, str, int],
+    client_factory: Callable[[Credentials], GitHubAppClient] = GitHubAppClient,
+    runner_factory: Callable[..., AgentRunner] = build_agent_runner,
+    workspace_factory: Callable[..., PRWorkspace] = PRWorkspace,
+    diff_artifact_writer: Callable[..., object] = write_diff_artifacts,
+) -> int:
+    owner, repo, number = target
+
+    progress.phase(Phase.REGISTRY, State.RUNNING, "agent registry discovery running")
     try:
         registry = discover_agent_registry()
     except RegistryError as e:
+        progress.phase(Phase.REGISTRY, State.FAILED, "agent registry invalid")
         print(f"error: agent registry invalid: {e}", file=sys.stderr)
         return 1
+    progress.phase(Phase.REGISTRY, State.SUCCEEDED, "agent registry discovered")
 
+    progress.phase(Phase.CREDENTIALS, State.RUNNING, "provider credentials loading")
     try:
         creds = build_credentials()
     except CredentialsError as e:
+        progress.phase(Phase.CREDENTIALS, State.FAILED, "provider credentials unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
 
     client = client_factory(creds)
     opts = RunOptions(args)
     if opts.max_agent_concurrency < 1:
+        progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
         print("error: max agent concurrency must be at least 1", file=sys.stderr)
+        return 1
+    if opts.agent_timeout < 0:
+        progress.phase(Phase.CREDENTIALS, State.SKIPPED, "provider authentication not attempted")
+        print("error: agent timeout must be non-negative", file=sys.stderr)
         return 1
     workspace = workspace_factory(
         opts.workspace_root, owner, repo, number, bootstrap_timeout=opts.bootstrap_timeout
@@ -299,36 +404,76 @@ def run_review(
         client.mint_app_jwt()
         token = client.mint_installation_token(f"{owner}/{repo}")
     except (CredentialsError, GitHubError) as e:
+        progress.phase(Phase.CREDENTIALS, State.FAILED, "provider authentication failed")
         print(f"error: {e}", file=sys.stderr)
         return 1
+    progress.phase(Phase.CREDENTIALS, State.SUCCEEDED, "provider authentication succeeded")
 
+    progress.phase(Phase.PR_METADATA, State.RUNNING, "pull request metadata loading")
     try:
         pr = client.fetch_pr(owner, repo, number, token)
+        bot_username = creds.bot_username or client.bot_username()
     except GitHubError as e:
+        progress.phase(Phase.PR_METADATA, State.FAILED, "pull request metadata unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
+    progress.phase(Phase.PR_METADATA, State.SUCCEEDED, "pull request metadata loaded")
 
-    bot_username = creds.bot_username or client.bot_username()
     if pr.sender_login == bot_username:
+        _skip_phases(
+            progress,
+            (
+                Phase.PROVIDER_DIFF,
+                Phase.WORKSPACE,
+                Phase.BOOTSTRAP,
+                Phase.REVIEWERS,
+                Phase.COORDINATION,
+                Phase.SCHEMA_VALIDATION,
+                Phase.DIFF_VALIDATION,
+                Phase.HEAD_FRESHNESS,
+                Phase.PAYLOAD,
+                Phase.POSTING,
+                Phase.CLEANUP,
+            ),
+            "bot-authored pull request ignored",
+        )
         print(
             f"skip: PR {pr.number} was opened by the bot ({bot_username}); "
             "not reviewing our own PRs."
         )
         return 0
 
+    progress.phase(Phase.PROVIDER_DIFF, State.RUNNING, "provider diff loading")
     try:
         diff_text = client.fetch_pr_diff(owner, repo, number, token)
     except GitHubError as e:
+        progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
-
+    provider_diff_settled = False
     try:
-        workspace.setup(pr.head_repo_clone_url, pr.head_sha, pr.head_ref, token)
-    except WorkspaceError as e:
-        print(f"error: workspace setup failed: {e}", file=sys.stderr)
-        return 2
+        progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
+        try:
+            workspace.setup(pr.head_repo_clone_url, pr.head_sha, pr.head_ref, token)
+        except WorkspaceError as e:
+            progress.phase(Phase.WORKSPACE, State.FAILED, "exact-head workspace setup failed")
+            print(f"error: workspace setup failed: {e}", file=sys.stderr)
+            return 2
+        progress.bind_workspace(
+            workspace.artifact_dir,
+            repository=f"{owner}/{repo}",
+            pull_request=number,
+            head_sha=pr.head_sha,
+            dry_run=opts.dry_run,
+            harness=Path(opts.agent_command).name,
+            max_concurrency=opts.max_agent_concurrency,
+            reviewer_names=[agent.name for agent in registry.reviewers],
+            coordinator_name=registry.coordinator.name,
+            timeout_seconds=opts.agent_timeout,
+        )
+        progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
 
-    try:
+        progress.phase(Phase.BOOTSTRAP, State.RUNNING, "repository bootstrap running")
         bootstrap = workspace.run_bootstrap(
             workspace.source_dir,
             extra_env={
@@ -338,8 +483,29 @@ def run_review(
             },
         )
         if not bootstrap.ok:
+            bootstrap_state = State.TIMED_OUT if bootstrap.exit_code is None else State.FAILED
+            progress.phase(Phase.BOOTSTRAP, bootstrap_state, "repository bootstrap failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.REVIEWERS,
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "bootstrap unavailable",
+                update_overall=False,
+            )
             print(f"error: bootstrap failed: {bootstrap.summary}", file=sys.stderr)
             return 2
+        progress.phase(
+            Phase.BOOTSTRAP,
+            State.SUCCEEDED if bootstrap.ran else State.SKIPPED,
+            "repository bootstrap succeeded" if bootstrap.ran else "no bootstrap configured",
+        )
 
         try:
             if diff_artifact_writer is write_diff_artifacts:
@@ -350,11 +516,34 @@ def run_review(
                 )
             else:
                 diff_artifact_writer(workspace.artifact_dir, diff_text)
+            write_shared_context(workspace.artifact_dir, pr, bootstrap)
         except DiffFilterError as e:
+            progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
+            provider_diff_settled = True
+            _skip_phases(
+                progress,
+                (
+                    Phase.REVIEWERS,
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "diff artifacts unavailable",
+                update_overall=False,
+            )
             print(f"error: diff artifact construction failed: {e}", file=sys.stderr)
             return 2
-        write_shared_context(workspace.artifact_dir, pr, bootstrap)
+        except OSError:
+            progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact persistence failed")
+            provider_diff_settled = True
+            raise
+        progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "diff artifacts ready")
+        provider_diff_settled = True
 
+        progress.phase(Phase.REVIEWERS, State.RUNNING, "review harness setup running")
         try:
             validate_workspace_isolation(workspace.source_dir, workspace.artifact_dir)
             runner = runner_factory(
@@ -365,6 +554,20 @@ def run_review(
                 persist_session=opts.persist_agent_session,
             )
         except (HarnessError, ResourceError) as e:
+            progress.phase(Phase.REVIEWERS, State.FAILED, "review harness setup failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "review harness unavailable",
+                update_overall=False,
+            )
             print(f"error: review harness setup failed: {e}", file=sys.stderr)
             return 2
 
@@ -393,11 +596,36 @@ def run_review(
                 runner,
                 invocations,
                 max_concurrency=opts.max_agent_concurrency,
+                on_queued=lambda agent_spec: progress.reviewer_queued(
+                    agent_spec.name, opts.agent_timeout
+                ),
+                on_started=lambda agent_spec: progress.reviewer_started(
+                    agent_spec.name, opts.agent_timeout
+                ),
+                on_settled=lambda result: progress.reviewer_settled(
+                    result.name,
+                    result.ok,
+                    timed_out=result.timed_out,
+                ),
             )
 
             try:
                 validate_result_identities(registry, agent_results)
             except CoordinatorError as e:
+                progress.phase(Phase.REVIEWERS, State.FAILED, "reviewer identity validation failed")
+                _skip_phases(
+                    progress,
+                    (
+                        Phase.COORDINATION,
+                        Phase.SCHEMA_VALIDATION,
+                        Phase.DIFF_VALIDATION,
+                        Phase.HEAD_FRESHNESS,
+                        Phase.PAYLOAD,
+                        Phase.POSTING,
+                    ),
+                    "reviewer results unavailable",
+                    update_overall=False,
+                )
                 print(f"error: {e}", file=sys.stderr)
                 return 4
 
@@ -406,14 +634,34 @@ def run_review(
             for failure in failures:
                 print(f"warning: agent {failure.name} {failure.summary}", file=sys.stderr)
             if not successful:
+                progress.phase(Phase.REVIEWERS, State.FAILED, "all reviewers failed")
+                _skip_phases(
+                    progress,
+                    (
+                        Phase.COORDINATION,
+                        Phase.SCHEMA_VALIDATION,
+                        Phase.DIFF_VALIDATION,
+                        Phase.HEAD_FRESHNESS,
+                        Phase.PAYLOAD,
+                        Phase.POSTING,
+                    ),
+                    "no successful reviewer result",
+                    update_overall=False,
+                )
                 print(
                     "error: all review agents failed; nothing to review, no review posted.",
                     file=sys.stderr,
                 )
                 return 3
+            progress.phase(
+                Phase.REVIEWERS,
+                State.SUCCEEDED,
+                "reviewers settled with partial failures" if failures else "reviewers succeeded",
+            )
 
-            write_raw_findings(workspace.artifact_dir, agent_results)
             try:
+                progress.coordinator_started()
+                write_raw_findings(workspace.artifact_dir, agent_results)
                 coordinator = registry.coordinator
                 capsule = resolver.create_capsule(coordinator)
                 spec = AgentSpec(
@@ -426,10 +674,40 @@ def run_review(
                     package_dir=coordinator.package_dir,
                 )
                 review = run_coordinator(runner, spec, capsule.root)
+                progress.coordinator_settled(ok=True)
             except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
+                progress.coordinator_settled(
+                    ok=False, timed_out=isinstance(e, CoordinatorError) and e.timed_out
+                )
+                _skip_phases(
+                    progress,
+                    (
+                        Phase.SCHEMA_VALIDATION,
+                        Phase.DIFF_VALIDATION,
+                        Phase.HEAD_FRESHNESS,
+                        Phase.PAYLOAD,
+                        Phase.POSTING,
+                    ),
+                    "coordinator result unavailable",
+                    update_overall=False,
+                )
                 print(f"error: {e}", file=sys.stderr)
                 return 4
         except (HarnessError, ResourceError, RegistryError) as e:
+            progress.phase(Phase.REVIEWERS, State.FAILED, "isolated reviewer invocation failed")
+            _skip_phases(
+                progress,
+                (
+                    Phase.COORDINATION,
+                    Phase.SCHEMA_VALIDATION,
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "reviewer results unavailable",
+                update_overall=False,
+            )
             print(f"error: isolated agent invocation failed: {e}", file=sys.stderr)
             return 2
         finally:
@@ -438,28 +716,61 @@ def run_review(
                 runner.close()
 
         # Final payload validation before any GitHub POST.
+        progress.phase(Phase.SCHEMA_VALIDATION, State.RUNNING, "review schema validation running")
         try:
             validate_review_output(review)
         except SchemaError as e:
+            progress.phase(Phase.SCHEMA_VALIDATION, State.FAILED, "review schema invalid")
+            _skip_phases(
+                progress,
+                (
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "review schema invalid",
+                update_overall=False,
+            )
             print(f"error: {e}", file=sys.stderr)
             return 7
+        progress.phase(Phase.SCHEMA_VALIDATION, State.SUCCEEDED, "review schema valid")
 
+        progress.phase(Phase.DIFF_VALIDATION, State.RUNNING, "diff line validation running")
         outcome = validate_findings_locations(review["findings"], parse_unified_diff(diff_text))
+        progress.phase(Phase.DIFF_VALIDATION, State.SUCCEEDED, "diff line validation succeeded")
 
         # Re-check the head SHA so we never post against a stale head.
+        progress.phase(Phase.HEAD_FRESHNESS, State.RUNNING, "pull request head recheck running")
         try:
             fresh = client.fetch_pr(owner, repo, number, token)
         except GitHubError as e:
+            progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head recheck failed")
+            _skip_phases(
+                progress,
+                (Phase.PAYLOAD, Phase.POSTING),
+                "head freshness unavailable",
+                update_overall=False,
+            )
             print(f"error: head re-check failed: {e}", file=sys.stderr)
             return 6
         if fresh.head_sha != pr.head_sha:
+            progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head changed")
+            _skip_phases(
+                progress,
+                (Phase.PAYLOAD, Phase.POSTING),
+                "pull request head changed",
+                update_overall=False,
+            )
             print(
                 f"error: PR head changed from {pr.head_sha} to {fresh.head_sha} before posting; "
                 "refuse to post against a stale head. Re-run the review.",
                 file=sys.stderr,
             )
             return 5
+        progress.phase(Phase.HEAD_FRESHNESS, State.SUCCEEDED, "pull request head unchanged")
 
+        progress.phase(Phase.PAYLOAD, State.RUNNING, "review payload retention running")
         event = event_for_findings(review["findings"])
         comments = build_inline_comments(outcome.attachable)
         body = build_review_body(review, failures, outcome.unattachable, len(review["findings"]))
@@ -468,6 +779,7 @@ def run_review(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        progress.phase(Phase.PAYLOAD, State.SUCCEEDED, "review payload retained")
 
         print(
             f"review ready: event={event} findings={len(review['findings'])} "
@@ -476,23 +788,72 @@ def run_review(
         )
 
         if opts.dry_run:
+            progress.phase(Phase.POSTING, State.SKIPPED, "dry run does not post")
             print("dry-run: final review payload (not posted):")
             print(json.dumps(payload, indent=2, ensure_ascii=False))
             return 0
 
+        progress.phase(Phase.POSTING, State.RUNNING, "provider review posting running")
         try:
             posted = client.post_review(
                 owner, repo, number, pr.head_sha, event, body, comments, token
             )
         except GitHubError as e:
+            progress.phase(Phase.POSTING, State.FAILED, "provider review posting failed")
             print(f"error: {e}", file=sys.stderr)
             return 6
+        progress.set_review_url(posted.get("html_url"))
+        progress.phase(Phase.POSTING, State.SUCCEEDED, "provider review accepted")
         print(f"posted review {posted.get('id')} ({posted.get('state')}) on {args.pr_url}")
         print(f"review URL: {posted.get('html_url')}")
         return 0
     finally:
-        if not opts.keep_workspace:
-            workspace.remove()
+        active_exception = sys.exc_info()[0]
+        if not provider_diff_settled:
+            _active_phase, active_state = progress.current_overall()
+            provider_diff_state = (
+                State.INTERRUPTED
+                if active_exception is KeyboardInterrupt
+                else State.TIMED_OUT
+                if active_state == State.TIMED_OUT
+                else State.FAILED
+            )
+            progress.phase(
+                Phase.PROVIDER_DIFF,
+                provider_diff_state,
+                "diff artifact construction aborted",
+                update_overall=False,
+            )
+        cleanup_started_normally = active_exception is None
+        prior_overall = progress.current_overall()
+        if opts.keep_workspace:
+            progress.phase(
+                Phase.CLEANUP,
+                State.SKIPPED,
+                "workspace retained",
+                update_overall=False,
+            )
+        else:
+            progress.phase(
+                Phase.CLEANUP,
+                State.RUNNING,
+                "workspace cleanup running",
+                update_overall=cleanup_started_normally,
+            )
+            try:
+                workspace.remove()
+            except Exception:
+                progress.phase(Phase.CLEANUP, State.FAILED, "workspace cleanup failed")
+                raise
+            progress.detach_store()
+            progress.phase(
+                Phase.CLEANUP,
+                State.SUCCEEDED,
+                "workspace cleanup succeeded",
+                update_overall=False,
+            )
+            if cleanup_started_normally:
+                progress.restore_overall(*prior_overall)
 
 
 def run_cleanup(
@@ -514,8 +875,45 @@ def run_cleanup(
     )
     workspace = workspace_factory(root, owner, repo, number)
     removed = workspace.workdir.exists()
-    workspace.remove()
+    try:
+        workspace.remove()
+    except OSError as e:
+        print(f"error: workspace cleanup failed: {e}", file=sys.stderr)
+        return 1
     print(f"{'removed' if removed else 'already absent'}: {workspace.workdir}")
+    return 0
+
+
+def run_status(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="review-bot status", description="Read a retained review progress snapshot."
+    )
+    parser.add_argument("pr_url", help="GitHub pull request URL")
+    parser.add_argument("--workspace-root", default=None)
+    parser.add_argument("--json", action="store_true", help="print the exact snapshot as JSON")
+    args = parser.parse_args(argv)
+    try:
+        owner, repo, number = parse_pr_url(args.pr_url)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    root = (
+        Path(
+            args.workspace_root or os.environ.get("REVIEW_WORKSPACE_ROOT") or DEFAULT_WORKSPACE_ROOT
+        )
+        .expanduser()
+        .resolve()
+    )
+    snapshot_path = workspace_dir_for(root, owner, repo, number) / "host-artifacts" / SNAPSHOT_NAME
+    try:
+        snapshot = read_snapshot(snapshot_path)
+    except ProgressError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(snapshot, indent=2, ensure_ascii=False))
+    else:
+        print(format_status(snapshot))
     return 0
 
 
@@ -523,6 +921,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "cleanup":
         return run_cleanup(argv[1:])
+    if argv and argv[0] == "status":
+        return run_status(argv[1:])
     return run_review(argv)
 
 

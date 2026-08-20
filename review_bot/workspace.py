@@ -259,4 +259,7 @@ class PRWorkspace:
 
     def remove(self) -> None:
         """Remove the PR workspace (explicit cleanup or session end)."""
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        try:
+            shutil.rmtree(self.workdir)
+        except FileNotFoundError:
+            return

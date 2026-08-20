@@ -12,12 +12,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..schema import SchemaError, load_schema, validate_review_output
 from .registry import AgentSkill, package_digest
@@ -91,6 +96,7 @@ class AgentResult:
     package_digest: str = ""
     output: dict | None = None
     error: str | None = None
+    timed_out: bool = False
     duration_seconds: float = 0.0
     extra: dict = field(default_factory=dict)
 
@@ -118,22 +124,160 @@ class AgentSpec:
 class AgentRunner:
     """Interface for running one agent in a workspace directory."""
 
+    def __init__(self) -> None:
+        self._process_lock = threading.RLock()
+        self._active_processes: set[subprocess.Popen[str]] = set()
+        self._terminating = False
+
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         raise NotImplementedError
 
+    def _process_state(self) -> tuple[threading.RLock, set[subprocess.Popen[str]]]:
+        if not hasattr(self, "_process_lock"):
+            self._process_lock = threading.RLock()
+            self._active_processes = set()
+            self._terminating = False
+        return self._process_lock, self._active_processes
+
+    def _run_process(self, cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        lock, processes = self._process_state()
+
+        def register(process: subprocess.Popen[str]) -> None:
+            with lock:
+                processes.add(process)
+                terminating = self._terminating
+            if terminating:
+                _terminate_processes([process])
+
+        def unregister(process: subprocess.Popen[str]) -> None:
+            with lock:
+                processes.discard(process)
+
+        return _run_agent_process(cmd, register=register, unregister=unregister, **kwargs)
+
+    def interrupt(self) -> None:
+        """Terminate every in-flight agent process before interruption propagates."""
+        lock, processes = self._process_state()
+        with lock:
+            self._terminating = True
+            active = list(processes)
+        _terminate_processes(active)
+
     def close(self) -> None:
         """Optional cleanup hook (e.g. temporary schema directories)."""
+
+
+def _terminate_processes(processes: list[subprocess.Popen[str]]) -> None:
+    if os.name == "posix":
+        process_groups = [process.pid for process in processes]
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+        deadline = time.monotonic() + 1.0
+        pending = process_groups
+        while pending and time.monotonic() < deadline:
+            time.sleep(0.01)
+            live: list[int] = []
+            for process_group in pending:
+                try:
+                    os.killpg(process_group, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    live.append(process_group)
+                    continue
+                live.append(process_group)
+            pending = live
+        for process_group in pending:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                continue
+        return
+
+    active = [process for process in processes if process.poll() is None]
+    for process in active:
+        try:
+            process.terminate()  # pragma: no cover - Windows fallback
+        except ProcessLookupError:
+            continue
+    deadline = time.monotonic() + 1.0
+    pending = [process for process in active if process.poll() is None]
+    while pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+        pending = [process for process in pending if process.poll() is None]
+    for process in pending:
+        try:
+            process.kill()  # pragma: no cover - Windows fallback
+        except ProcessLookupError:
+            continue
+
+
+def _run_agent_process(
+    cmd: list[str],
+    *,
+    register: Callable[[subprocess.Popen[str]], None],
+    unregister: Callable[[subprocess.Popen[str]], None],
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Run one tracked agent subprocess so Ctrl-C can terminate it promptly."""
+    input_value = kwargs.pop("input", None)
+    timeout = kwargs.pop("timeout", None)
+    capture_output = kwargs.pop("capture_output", False)
+    if capture_output:
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if input_value is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    kwargs["start_new_session"] = os.name == "posix"
+    process = subprocess.Popen(cmd, **kwargs)
+    try:
+        register(process)
+    except BaseException:
+        try:
+            _terminate_processes([process])
+        finally:
+            with suppress(Exception):
+                unregister(process)
+        raise
+    try:
+        stdout, stderr = process.communicate(input=input_value, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_processes([process])
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(exc.cmd, exc.timeout, output=stdout, stderr=stderr) from exc
+    except BaseException:
+        _terminate_processes([process])
+        raise
+    finally:
+        unregister(process)
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def run_agents_concurrently(
     runner: AgentRunner,
     invocations: list[tuple[AgentSpec, Path]],
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    on_queued: Callable[[AgentSpec], None] | None = None,
+    on_started: Callable[[AgentSpec], None] | None = None,
+    on_settled: Callable[[AgentResult], None] | None = None,
 ) -> list[AgentResult]:
-    """Run every invocation with bounded concurrency; keep registry order."""
+    """Run with bounded concurrency, immediate callbacks, and registry order."""
+
+    def _notify(callback: Callable | None, value: object) -> None:
+        if callback is None:
+            return
+        try:
+            callback(value)
+        except Exception:
+            # Progress observers must never replace or reorder review results.
+            return
 
     def _one(invocation: tuple[AgentSpec, Path]) -> AgentResult:
         spec, workdir = invocation
+        _notify(on_started, spec)
         return runner.run(spec, workdir)
 
     if not invocations:
@@ -142,8 +286,75 @@ def run_agents_concurrently(
         raise ValueError("max_concurrency must be at least 1")
     for spec, _workdir in invocations:
         verify_spec_package(spec)
-    with ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency)) as pool:
-        return list(pool.map(_one, invocations))
+    for spec, _workdir in invocations:
+        _notify(on_queued, spec)
+
+    results: list[AgentResult | None] = [None] * len(invocations)
+    pool = ThreadPoolExecutor(max_workers=min(len(invocations), max_concurrency))
+    needs_shutdown = True
+    futures: dict[Future[AgentResult], int] = {}
+    settled: set[Future[AgentResult]] = set()
+
+    def _failed_result(index: int) -> AgentResult:
+        spec, _workdir = invocations[index]
+        return AgentResult(
+            name=spec.name,
+            ok=False,
+            contract_version=spec.contract_version,
+            package_digest=spec.package_digest,
+            error="reviewer invocation failed",
+        )
+
+    def _settle_completed() -> None:
+        for future, index in futures.items():
+            if future in settled or not future.done() or future.cancelled():
+                continue
+            try:
+                result = future.result()
+            except Exception:
+                settled.add(future)
+                _notify(on_settled, _failed_result(index))
+                continue
+            except BaseException:
+                continue
+            results[index] = result
+            settled.add(future)
+            _notify(on_settled, result)
+
+    try:
+        futures = {
+            pool.submit(_one, invocation): index for index, invocation in enumerate(invocations)
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception:
+                settled.add(future)
+                _notify(on_settled, _failed_result(futures[future]))
+                raise
+            results[futures[future]] = result
+            settled.add(future)
+            _notify(on_settled, result)
+    except KeyboardInterrupt:
+        _settle_completed()
+        with suppress(Exception):
+            runner.interrupt()
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        needs_shutdown = False
+        raise
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        needs_shutdown = False
+        _settle_completed()
+        raise
+    finally:
+        if needs_shutdown:
+            pool.shutdown(wait=True)
+    return [result for result in results if result is not None]
 
 
 def verify_spec_package(spec: AgentSpec) -> None:
@@ -221,6 +432,7 @@ class CodexAgentRunner(AgentRunner):
         timeout: int = DEFAULT_AGENT_TIMEOUT,
         schema: dict | None = None,
     ):
+        super().__init__()
         self.command = command
         self.model = model
         self.timeout = timeout
@@ -230,6 +442,7 @@ class CodexAgentRunner(AgentRunner):
         self._schema_file.write_text(json.dumps(self._schema), encoding="utf-8")
 
     def close(self) -> None:
+        self.interrupt()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
@@ -272,7 +485,7 @@ class CodexAgentRunner(AgentRunner):
         )
 
         try:
-            proc = subprocess.run(
+            proc = self._run_process(
                 cmd,
                 input=prompt,
                 capture_output=True,
@@ -288,6 +501,7 @@ class CodexAgentRunner(AgentRunner):
                 package_digest=spec.package_digest,
                 ok=False,
                 error=f"agent timed out after {self.timeout}s",
+                timed_out=True,
                 duration_seconds=time.monotonic() - started,
             )
         except OSError as e:
@@ -374,6 +588,7 @@ class PiAgentRunner(AgentRunner):
         timeout: int = DEFAULT_AGENT_TIMEOUT,
         persist_session: bool = True,
     ):
+        super().__init__()
         self.command = command
         self.model = model
         self.thinking = thinking
@@ -382,10 +597,28 @@ class PiAgentRunner(AgentRunner):
         self._tmpdir = Path(tempfile.mkdtemp(prefix="review-bot-agent-"))
 
     def close(self) -> None:
+        self.interrupt()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _run_once(self, spec: AgentSpec, prompt_file: Path, workdir: Path) -> AgentResult:
+    def _run_once(
+        self,
+        spec: AgentSpec,
+        prompt_file: Path,
+        workdir: Path,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResult:
         started = time.monotonic()
+        effective_timeout = self.timeout if timeout is None else max(0.0, timeout)
+        if effective_timeout == 0:
+            return AgentResult(
+                name=spec.name,
+                contract_version=spec.contract_version,
+                package_digest=spec.package_digest,
+                ok=False,
+                error=f"agent timed out after {self.timeout}s",
+                timed_out=True,
+            )
         # Allow per-agent thinking overrides (e.g. REVIEW_CORRECTNESS_THINKING).
         per_agent_key = f"REVIEW_{spec.name.upper().replace('-', '_')}_THINKING"
         thinking = os.environ.get(per_agent_key) or self.thinking
@@ -418,11 +651,11 @@ class PiAgentRunner(AgentRunner):
         cmd += [f"@{input_file}" for input_file in spec.input_files]
 
         try:
-            proc = subprocess.run(
+            proc = self._run_process(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=effective_timeout,
                 cwd=str(workdir),
             )
         except subprocess.TimeoutExpired:
@@ -431,7 +664,8 @@ class PiAgentRunner(AgentRunner):
                 contract_version=spec.contract_version,
                 package_digest=spec.package_digest,
                 ok=False,
-                error=f"agent timed out after {self.timeout}s",
+                error=f"agent timed out after {effective_timeout:g}s",
+                timed_out=True,
                 duration_seconds=time.monotonic() - started,
             )
         except OSError as e:
@@ -472,10 +706,11 @@ class PiAgentRunner(AgentRunner):
 
     def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
         verify_spec_package(spec)
+        started = time.monotonic()
         prompt_file = self._tmpdir / f"{spec.name}-prompt.md"
         prompt_file.write_text(spec.prompt, encoding="utf-8")
 
-        result = self._run_once(spec, prompt_file, workdir)
+        result = self._run_once(spec, prompt_file, workdir, timeout=self.timeout)
         invalid_output = result.extra.get("invalid_output")
         if result.ok or invalid_output is None:
             return result
@@ -500,7 +735,14 @@ class PiAgentRunner(AgentRunner):
             spec.skills,
             spec.package_dir,
         )
-        repaired = self._run_once(repair_spec, repair_prompt_file, workdir)
+        remaining = max(0.0, self.timeout - (time.monotonic() - started))
+        repaired = self._run_once(
+            repair_spec,
+            repair_prompt_file,
+            workdir,
+            timeout=remaining,
+        )
+        repaired.duration_seconds = time.monotonic() - started
         if not repaired.ok:
             repaired.error = f"{result.error}; schema repair failed: {repaired.error}"
         return repaired

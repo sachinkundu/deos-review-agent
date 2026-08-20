@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-progress-snapshot/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "run_id",
+    "repository",
+    "pull_request",
+    "head_sha",
+    "mode",
+    "harness",
+    "max_concurrency",
+    "overall",
+    "started_at",
+    "updated_at",
+    "finished_at",
+    "reviewers",
+    "coordinator",
+    "final_exit_code",
+    "review_url"
+  ],
+  "properties": {
+    "contract": {"const": "review-progress-snapshot/v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"},
+    "pull_request": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["dry-run", "post"]},
+    "harness": {"type": "string", "minLength": 1},
+    "max_concurrency": {"type": "integer", "minimum": 1},
+    "overall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "state"],
+      "properties": {
+        "phase": {"$ref": "#/$defs/phase"},
+        "state": {"$ref": "#/$defs/state"}
+      }
+    },
+    "started_at": {"$ref": "#/$defs/timestamp"},
+    "updated_at": {"$ref": "#/$defs/timestamp"},
+    "finished_at": {
+      "oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/work_item"}
+    },
+    "coordinator": {
+      "oneOf": [{"$ref": "#/$defs/work_item"}, {"type": "null"}]
+    },
+    "final_exit_code": {"type": ["integer", "null"]},
+    "review_url": {
+      "oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]
+    }
+  },
+  "$defs": {
+    "phase": {
+      "enum": [
+        "credentials",
+        "pr-metadata",
+        "provider-diff",
+        "workspace",
+        "bootstrap",
+        "registry",
+        "reviewers",
+        "coordination",
+        "schema-validation",
+        "diff-validation",
+        "head-freshness",
+        "payload",
+        "posting",
+        "cleanup"
+      ]
+    },
+    "state": {
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "timed-out",
+        "skipped",
+        "interrupted"
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "work_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "state",
+        "started_at",
+        "finished_at",
+        "elapsed_seconds",
+        "timeout_seconds",
+        "error_summary"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "state": {"$ref": "#/$defs/state"},
+        "started_at": {
+          "oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]
+        },
+        "finished_at": {
+          "oneOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]
+        },
+        "elapsed_seconds": {"type": "number", "minimum": 0},
+        "timeout_seconds": {"type": "number", "minimum": 0},
+        "error_summary": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

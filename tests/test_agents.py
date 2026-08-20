@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -129,6 +131,400 @@ def test_concurrency_is_bounded_and_result_order_is_stable():
     assert [result.name for result in results] == [spec.name for spec in specs]
 
 
+def test_concurrent_callbacks_show_all_queued_then_immediate_settlement():
+    release_first = threading.Event()
+    second_finished = threading.Event()
+    events: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    class OutOfOrderRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                assert release_first.wait(timeout=2)
+            else:
+                second_finished.set()
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def record(kind: str, name: str) -> None:
+        with lock:
+            events.append((kind, name))
+
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+
+    def release_after_second() -> None:
+        assert second_finished.wait(timeout=2)
+        release_first.set()
+
+    releaser = threading.Thread(target=release_after_second)
+    releaser.start()
+    results = run_agents_concurrently(
+        OutOfOrderRunner(),
+        invocations,
+        max_concurrency=2,
+        on_queued=lambda spec: record("queued", spec.name),
+        on_started=lambda spec: record("started", spec.name),
+        on_settled=lambda result: record("settled", result.name),
+    )
+    releaser.join()
+
+    assert events[:2] == [("queued", "first"), ("queued", "second")]
+    assert events.index(("settled", "second")) < events.index(("settled", "first"))
+    assert [result.name for result in results] == ["first", "second"]
+
+
+def test_exceptional_future_settles_failed_before_waiting_for_active_peer():
+    both_started = threading.Barrier(2, timeout=2)
+    release_peer = threading.Event()
+    failed_settled = threading.Event()
+    events: list[tuple[str, str, bool, str | None]] = []
+    propagated: list[BaseException] = []
+
+    class ExceptionalRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            both_started.wait()
+            if spec.name == "failing":
+                raise OSError("prompt write exposed detail")
+            assert release_peer.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def settled(result: AgentResult) -> None:
+        events.append(("settled", result.name, result.ok, result.error))
+        if result.name == "failing":
+            failed_settled.set()
+
+    def invoke() -> None:
+        try:
+            run_agents_concurrently(
+                ExceptionalRunner(),
+                [
+                    (AgentSpec("failing", "prompt", ()), Path("/tmp/failing")),
+                    (AgentSpec("peer", "prompt", ()), Path("/tmp/peer")),
+                ],
+                max_concurrency=2,
+                on_settled=settled,
+            )
+        except BaseException as exc:
+            propagated.append(exc)
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert failed_settled.wait(timeout=2)
+    assert thread.is_alive()
+    assert events == [("settled", "failing", False, "reviewer invocation failed")]
+    release_peer.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert isinstance(propagated[0], OSError)
+    assert events[-1] == ("settled", "peer", True, None)
+
+
+def test_waiting_reviewers_remain_queued_until_worker_is_available():
+    first_started = threading.Event()
+    release_first = threading.Event()
+    events: list[tuple[str, str]] = []
+
+    class BlockingRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+    completed: list[list[AgentResult]] = []
+
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            run_agents_concurrently(
+                BlockingRunner(),
+                invocations,
+                max_concurrency=1,
+                on_queued=lambda spec: events.append(("queued", spec.name)),
+                on_started=lambda spec: events.append(("started", spec.name)),
+            )
+        )
+    )
+    thread.start()
+    assert first_started.wait(timeout=2)
+    assert events[:2] == [("queued", "first"), ("queued", "second")]
+    assert ("started", "first") in events
+    assert ("started", "second") not in events
+    release_first.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert [result.name for result in completed[0]] == ["first", "second"]
+
+
+def test_interrupt_cancels_queued_reviewers_without_waiting_for_active_one(monkeypatch):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    interrupt_called = threading.Event()
+
+    class BlockingRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            else:
+                second_started.set()
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+        def interrupt(self) -> None:
+            interrupt_called.set()
+
+    class InterruptingCompletionIterator:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            assert first_started.wait(timeout=2)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        runner_module,
+        "as_completed",
+        lambda futures: InterruptingCompletionIterator(),
+    )
+    invocations = [
+        (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+        (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+    ]
+
+    try:
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            run_agents_concurrently(BlockingRunner(), invocations, max_concurrency=1)
+        assert time.monotonic() - started < 1.0
+        assert interrupt_called.is_set()
+        assert not release_first.is_set()
+        assert not second_started.is_set()
+    finally:
+        release_first.set()
+    time.sleep(0.05)
+    assert not second_started.is_set()
+
+
+def test_pi_interrupt_terminates_active_subprocess_promptly():
+    runner = PiAgentRunner(command="pi")
+    completed: list[subprocess.CompletedProcess[str]] = []
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            runner._run_process(  # type: ignore[reportPrivateUsage]
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        )
+    )
+    thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if runner._active_processes:  # type: ignore[reportPrivateUsage]
+            break
+        time.sleep(0.01)
+    assert runner._active_processes  # type: ignore[reportPrivateUsage]
+
+    runner.interrupt()
+    thread.join(timeout=2)
+    runner.close()
+
+    assert not thread.is_alive()
+    assert completed[0].returncode != 0
+
+
+def test_posix_termination_kills_group_after_leader_exits(monkeypatch):
+    class ExitedLeader:
+        pid = 4321
+
+        def poll(self):
+            return 0
+
+    signals: list[tuple[int, int]] = []
+    monotonic = iter((0.0, 0.5, 2.0))
+
+    monkeypatch.setattr(runner_module.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        runner_module.os,
+        "killpg",
+        lambda process_group, sent_signal: signals.append((process_group, sent_signal)),
+    )
+
+    runner_module._terminate_processes([ExitedLeader()])  # type: ignore[arg-type,reportPrivateUsage]
+
+    assert signals == [
+        (4321, signal.SIGTERM),
+        (4321, 0),
+        (4321, signal.SIGKILL),
+    ]
+
+
+def test_process_registered_during_interrupt_is_terminated(monkeypatch):
+    runner = PiAgentRunner(command="pi")
+    real_popen = subprocess.Popen
+    process_created = threading.Event()
+    release_registration = threading.Event()
+    spawned: list[subprocess.Popen[str]] = []
+    completed: list[subprocess.CompletedProcess[str]] = []
+
+    def delayed_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        process_created.set()
+        assert release_registration.wait(timeout=2)
+        return process
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", delayed_popen)
+    thread = threading.Thread(
+        target=lambda: completed.append(
+            runner._run_process(  # type: ignore[reportPrivateUsage]
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        )
+    )
+    thread.start()
+    assert process_created.wait(timeout=2)
+    runner.interrupt()
+    release_registration.set()
+    thread.join(timeout=2)
+    runner.close()
+
+    assert not thread.is_alive()
+    assert spawned[0].returncode != 0
+    assert completed[0].returncode != 0
+
+
+def test_registration_interrupt_terminates_new_process_before_propagating():
+    spawned: list[subprocess.Popen[str]] = []
+    unregistered: list[subprocess.Popen[str]] = []
+
+    def interrupt_registration(process: subprocess.Popen[str]) -> None:
+        spawned.append(process)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_module._run_agent_process(  # type: ignore[reportPrivateUsage]
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            register=interrupt_registration,
+            unregister=unregistered.append,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert len(spawned) == 1
+    spawned[0].wait(timeout=2)
+    assert spawned[0].returncode != 0
+    assert unregistered == spawned
+
+
+def test_communicate_interrupt_terminates_process_before_unregistering(monkeypatch):
+    events: list[str] = []
+
+    class InterruptingProcess:
+        returncode = None
+
+        def communicate(self, **kwargs):
+            raise KeyboardInterrupt
+
+    process = InterruptingProcess()
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        runner_module,
+        "_terminate_processes",
+        lambda processes: events.append("terminate"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        runner_module._run_agent_process(  # type: ignore[arg-type,reportPrivateUsage]
+            ["agent"],
+            register=lambda active: events.append("register"),
+            unregister=lambda active: events.append("unregister"),
+        )
+
+    assert events == ["register", "terminate", "unregister"]
+
+
+def test_non_interrupt_exception_waits_for_active_reviewer_before_cleanup():
+    second_started = threading.Event()
+    release_second = threading.Event()
+    captured: list[BaseException] = []
+    settled: list[str] = []
+
+    class ExceptionalRunner(AgentRunner):
+        def run(self, spec: AgentSpec, workdir: Path) -> AgentResult:
+            if spec.name == "first":
+                assert second_started.wait(timeout=2)
+                raise OSError("disk unavailable")
+            second_started.set()
+            assert release_second.wait(timeout=2)
+            return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    def run() -> None:
+        try:
+            run_agents_concurrently(
+                ExceptionalRunner(),
+                [
+                    (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+                    (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+                ],
+                max_concurrency=2,
+                on_settled=lambda result: settled.append(result.name),
+            )
+        except BaseException as exc:
+            captured.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert second_started.wait(timeout=2)
+    time.sleep(0.05)
+    assert thread.is_alive()
+    release_second.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert len(captured) == 1
+    assert isinstance(captured[0], OSError)
+    assert settled == ["first", "second"]
+
+
+def test_progress_callback_failures_do_not_change_agent_results():
+    runner = FakeAgentRunner(
+        {
+            "first": make_review(findings=[]),
+            "second": Exception("agent failed"),
+        }
+    )
+
+    def broken_callback(value) -> None:
+        raise OSError("observer unavailable")
+
+    results = run_agents_concurrently(
+        runner,
+        [
+            (AgentSpec("first", "prompt", ()), Path("/tmp/first")),
+            (AgentSpec("second", "prompt", ()), Path("/tmp/second")),
+        ],
+        on_queued=broken_callback,
+        on_started=broken_callback,
+        on_settled=broken_callback,
+    )
+    assert [result.name for result in results] == ["first", "second"]
+    assert results[0].ok
+    assert not results[1].ok
+
+
 def test_package_mutation_blocks_launch_before_any_runner_starts(tmp_path: Path):
     package = tmp_path / "agent"
     package.mkdir()
@@ -173,7 +569,7 @@ def test_codex_runner_prompt_names_only_explicit_inputs(monkeypatch, tmp_path: P
         output_path.write_text(json.dumps(make_review(findings=[])))
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
         result = runner.run(
@@ -227,7 +623,7 @@ def test_codex_runner_uses_clean_homes_minimal_auth_and_only_owned_skills(
         output_path.write_text(json.dumps(make_review(findings=[])))
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
         result = runner.run(AgentSpec("reviewer", "prompt", (), skills=(skill,)), capsule)
@@ -287,7 +683,7 @@ def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path)
             cmd, returncode=0, stdout=json.dumps(next(responses)), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", thinking="high")
     try:
         result = runner.run(
@@ -313,6 +709,37 @@ def test_pi_runner_repairs_schema_invalid_json_once(monkeypatch, tmp_path: Path)
     assert "x" * 81 in repair_prompt
 
 
+def test_pi_schema_repair_shares_the_agent_timeout_budget(monkeypatch, tmp_path: Path):
+    clock = [100.0]
+    timeouts: list[float | None] = []
+    invalid = make_review()
+
+    def fake_run_once(spec, prompt_file, workdir, *, timeout=None):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock[0] += 7.0
+            return AgentResult(
+                name=spec.name,
+                ok=False,
+                error="schema invalid",
+                extra={"invalid_output": invalid},
+            )
+        clock[0] += 3.0
+        return AgentResult(name=spec.name, ok=True, output=make_review(findings=[]))
+
+    monkeypatch.setattr("review_bot.agents.runner.time.monotonic", lambda: clock[0])
+    runner = PiAgentRunner(command="pi", timeout=10)
+    monkeypatch.setattr(runner, "_run_once", fake_run_once)
+    try:
+        result = runner.run(AgentSpec("tests", "prompt", ()), tmp_path)
+    finally:
+        runner.close()
+
+    assert result.ok
+    assert timeouts == [10, 3.0]
+    assert result.duration_seconds == 10.0
+
+
 def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
     commands: list[list[str]] = []
 
@@ -322,7 +749,7 @@ def test_pi_runner_can_disable_session_persistence(monkeypatch, tmp_path: Path):
             cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", persist_session=False)
     try:
         result = runner.run(
@@ -359,7 +786,7 @@ def test_pi_runner_passes_only_explicit_owned_skills(monkeypatch, tmp_path: Path
             cmd, returncode=0, stdout=json.dumps(make_review()), stderr=""
         )
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     runner = PiAgentRunner(command="pi", persist_session=False)
     try:
         result = runner.run(
@@ -441,7 +868,7 @@ def test_agent_runner_returns_failure_when_command_cannot_start(
     from review_bot.schema import load_schema
 
     monkeypatch.setattr(
-        "review_bot.agents.runner.subprocess.run",
+        "review_bot.agents.runner._run_agent_process",
         lambda cmd, **kwargs: (_ for _ in ()).throw(PermissionError("not executable")),
     )
     runner: AgentRunner
@@ -477,7 +904,7 @@ def test_codex_runner_returns_failure_for_unreadable_output(
             raise OSError("unreadable")
         return original_read_text(path, *args, **kwargs)
 
-    monkeypatch.setattr("review_bot.agents.runner.subprocess.run", fake_run)
+    monkeypatch.setattr("review_bot.agents.runner._run_agent_process", fake_run)
     monkeypatch.setattr(Path, "read_text", fake_read_text)
     runner = CodexAgentRunner(command="codex", schema=load_schema())
     try:
