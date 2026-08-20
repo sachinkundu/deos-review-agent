@@ -23,6 +23,7 @@
 
 - [x] 4.1 Document progress modes, JSON stderr, retained `progress.json`, status inspection, sanitization, and cleanup behavior in README/operator guidance.
 - [x] 4.2 Run the complete pytest, Ruff format/lint, Pyright, strict OpenSpec, package-resource, and diff checks; resolve every failure.
+- [x] 4.3 Render reviewers and the coordinator as visually indented tree children beneath their aggregate Rich progress rows, with deterministic hierarchy tests and operator documentation.
 
 ## 5. Real Exact-Head Proof and PR Evidence
 

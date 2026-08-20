@@ -72,9 +72,11 @@ Review runs accept `--progress auto|plain|json|off` and default to `auto`:
 
 Progress shows pipeline phases, every selected reviewer in registry order,
 immediate settlement, elapsed time, configured timeouts, partial failures, and
-handled interruption. It never shows percentages or model ETAs, and it does not
-retain credentials, prompts, model input/output, finding bodies, repository
-contents, or subprocess commands.
+handled interruption. The Rich view groups reviewers as visually indented tree
+children beneath `reviewers` and the coordinator beneath `coordination`, so
+aggregate phases cannot be mistaken for peer agents. Progress never shows
+percentages or model ETAs, and it does not retain credentials, prompts, model
+input/output, finding bodies, repository contents, or subprocess commands.
 
 Inspect a retained workspace without GitHub authentication, model execution,
 posting, or file mutation:

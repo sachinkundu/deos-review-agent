@@ -170,6 +170,52 @@ def test_rich_live_elapsed_advances_only_from_monotonic_time(monkeypatch):
         renderer.close()
 
 
+def test_rich_view_renders_reviewer_and_coordinator_tree_hierarchy():
+    renderer = RichProgressRenderer(io.StringIO(), no_color=True)
+    reviewer_template = {
+        "started_at": None,
+        "finished_at": None,
+        "elapsed_seconds": 0.0,
+        "timeout_seconds": 30,
+        "error_summary": None,
+    }
+    snapshot = {
+        "overall": {"phase": "reviewers", "state": "running"},
+        "reviewers": [
+            {**reviewer_template, "name": "correctness", "state": "running"},
+            {**reviewer_template, "name": "tests", "state": "queued"},
+        ],
+        "coordinator": {**reviewer_template, "name": "coordinator", "state": "queued"},
+    }
+    event = {"phase": "reviewers", "state": "running", "elapsed_seconds": 5.0}
+
+    try:
+        renderer.render(event, snapshot)
+        work_labels = [str(cell) for cell in renderer.build_table().columns[0]._cells]
+        assert work_labels == [
+            "reviewers",
+            "  ├─ correctness",
+            "  └─ tests",
+            "coordination",
+            "  └─ coordinator",
+        ]
+
+        snapshot["overall"] = {"phase": "posting", "state": "running"}
+        event = {"phase": "posting", "state": "running", "elapsed_seconds": 1.0}
+        renderer.render(event, snapshot)
+        work_labels = [str(cell) for cell in renderer.build_table().columns[0]._cells]
+        assert work_labels == [
+            "posting",
+            "reviewers",
+            "  ├─ correctness",
+            "  └─ tests",
+            "coordination",
+            "  └─ coordinator",
+        ]
+    finally:
+        renderer.close()
+
+
 def test_rich_live_operations_run_without_holding_state_lock():
     renderer = RichProgressRenderer(io.StringIO(), no_color=True)
     operations: list[str] = []

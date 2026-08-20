@@ -26,6 +26,12 @@ The system SHALL accept `--progress auto|plain|json|off` for review runs and SHA
 ### Requirement: Render useful human progress
 The live terminal presentation SHALL use rich, colorful formatting wherever the terminal supports it and SHALL distinguish queued, active, successful, failed, timed-out, skipped, and interrupted work without claiming a completion percentage or model ETA. Plain progress SHALL represent the same state transitions as stable human-readable lines. Both presentations SHALL show elapsed time for active work and configured timeouts for active reviewer invocations.
 
+The live terminal presentation SHALL render individual reviewers as visually
+indented tree children of an aggregate `reviewers` row. When coordinator work
+is visible, it SHALL render as a visually indented child of a separate
+`coordination` row. Reviewer and coordinator children MUST NOT appear as peers
+of their aggregate phase or as children of an unrelated current phase.
+
 #### Scenario: Terminal supports rich color
 - **WHEN** live progress is active in a terminal that supports color and live updates
 - **THEN** the system uses color and live visual state to distinguish pipeline and reviewer status
@@ -37,6 +43,14 @@ The live terminal presentation SHALL use rich, colorful formatting wherever the 
 #### Scenario: Reviewer remains active
 - **WHEN** a reviewer invocation is still running
 - **THEN** the human presentation shows an indeterminate active state, its elapsed duration, and its configured timeout without showing a percentage or ETA
+
+#### Scenario: Reviewer hierarchy is visible
+- **WHEN** the live presentation shows the reviewer roster
+- **THEN** `reviewers` is shown as the parent row and each registry-ordered reviewer is visually indented beneath it with tree connectors
+
+#### Scenario: Coordinator hierarchy is visible
+- **WHEN** the live presentation shows coordinator work
+- **THEN** `coordination` is shown as a separate parent row and the coordinator is visually indented beneath it
 
 #### Scenario: Plain progress is redirected
 - **WHEN** plain progress is written to a file or non-interactive stream

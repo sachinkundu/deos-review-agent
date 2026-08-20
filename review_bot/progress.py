@@ -263,6 +263,38 @@ class RichProgressRenderer:
             return Phase.CLEANUP.value, str(event["state"])
         return phase, state
 
+    @staticmethod
+    def _reviewer_group_state(reviewers: list[dict[str, Any]]) -> str:
+        states = [str(item["state"]) for item in reviewers]
+        if all(state == State.QUEUED.value for state in states):
+            return State.QUEUED.value
+        if any(state in {State.QUEUED.value, State.RUNNING.value} for state in states):
+            return State.RUNNING.value
+        if any(state == State.SUCCEEDED.value for state in states):
+            return State.SUCCEEDED.value
+        if all(state == State.SKIPPED.value for state in states):
+            return State.SKIPPED.value
+        if any(state == State.INTERRUPTED.value for state in states):
+            return State.INTERRUPTED.value
+        return State.FAILED.value
+
+    def _add_work_item_row(self, table: Table, item: dict[str, Any], label: str) -> None:
+        item_state = str(item["state"])
+        table.add_row(
+            label,
+            Text(item_state, style=self._STYLES.get(item_state, "")),
+            f"{self._live_elapsed(item):.1f}s",
+            f"{float(item['timeout_seconds']):g}s",
+        )
+
+    def _add_group_row(self, table: Table, name: str, state: str, elapsed: str = "—") -> None:
+        table.add_row(
+            Text(name, style="bold"),
+            Text(state, style=self._STYLES.get(state, "")),
+            elapsed,
+            "—",
+        )
+
     def build_table(self) -> Table:
         with self._lock:
             event = dict(self._event or {})
@@ -276,25 +308,43 @@ class RichProgressRenderer:
             overall = snapshot["overall"]
             assert isinstance(overall, dict)
             phase, state = self._pipeline_status(event, overall)
-            table.add_row(
-                phase,
-                Text(state, style=self._STYLES.get(state, "")),
-                f"{self._live_pipeline_elapsed(event, state):.1f}s",
-                "—",
-            )
-            items = list(snapshot["reviewers"])
+            phase_elapsed = f"{self._live_pipeline_elapsed(event, state):.1f}s"
+            reviewers = list(snapshot["reviewers"])
             coordinator = snapshot.get("coordinator")
-            if coordinator:
-                items.append(coordinator)
-            for raw in items:
-                assert isinstance(raw, dict)
-                item_state = str(raw["state"])
-                table.add_row(
-                    str(raw["name"]),
-                    Text(item_state, style=self._STYLES.get(item_state, "")),
-                    f"{self._live_elapsed(raw):.1f}s",
-                    f"{float(raw['timeout_seconds']):g}s",
+
+            if phase not in {Phase.REVIEWERS.value, Phase.COORDINATION.value}:
+                self._add_group_row(table, phase, state, phase_elapsed)
+
+            if reviewers:
+                reviewer_state = (
+                    state
+                    if phase == Phase.REVIEWERS.value
+                    else self._reviewer_group_state(reviewers)
                 )
+                reviewer_elapsed = phase_elapsed if phase == Phase.REVIEWERS.value else "—"
+                self._add_group_row(table, Phase.REVIEWERS.value, reviewer_state, reviewer_elapsed)
+                for index, raw in enumerate(reviewers):
+                    assert isinstance(raw, dict)
+                    connector = "└─" if index == len(reviewers) - 1 else "├─"
+                    self._add_work_item_row(table, raw, f"  {connector} {raw['name']}")
+            elif phase == Phase.REVIEWERS.value:
+                self._add_group_row(table, phase, state, phase_elapsed)
+
+            if coordinator:
+                assert isinstance(coordinator, dict)
+                coordinator_state = (
+                    state if phase == Phase.COORDINATION.value else str(coordinator["state"])
+                )
+                coordinator_elapsed = phase_elapsed if phase == Phase.COORDINATION.value else "—"
+                self._add_group_row(
+                    table,
+                    Phase.COORDINATION.value,
+                    coordinator_state,
+                    coordinator_elapsed,
+                )
+                self._add_work_item_row(table, coordinator, f"  └─ {coordinator['name']}")
+            elif phase == Phase.COORDINATION.value:
+                self._add_group_row(table, phase, state, phase_elapsed)
         elif event:
             state = str(event["state"])
             table.add_row(
