@@ -22,7 +22,7 @@ This change does not add risk tiers, re-reviews, break glass, hosted execution, 
 
 ### Modified Capabilities
 
-- `review-bot/agent-pipeline`: Replace the fixed named roster and coordinator role list with deterministic execution and coordination of dynamically discovered agents while preserving bounded concurrency and partial-failure behavior.
+- `agent-pipeline`: Replace the fixed named roster and coordinator role list with deterministic execution and coordination of dynamically discovered agents while preserving bounded concurrency and partial-failure behavior.
 
 ## Impact
 

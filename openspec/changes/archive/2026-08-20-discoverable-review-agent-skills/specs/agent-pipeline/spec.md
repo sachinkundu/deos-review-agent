@@ -3,7 +3,7 @@
 ### Requirement: Run review agents concurrently
 The system SHALL select every valid registered reviewer agent for this change and run the selected reviewers with bounded concurrency. Execution order and result serialization SHALL follow registry order regardless of completion order.
 
-#### Scenario: Registered reviewers start
+#### Scenario: Both agents start
 - **WHEN** the agent pipeline begins with one or more valid registered reviewers
 - **THEN** every registered reviewer is submitted with its prompt, declared inputs, and optional Agent Skills
 
@@ -26,11 +26,15 @@ The system SHALL select every valid registered reviewer agent for this change an
 ### Requirement: Feed all findings to the coordinator
 The system SHALL pass the catalog entry and attributed result from every selected registered reviewer to the registered roster-agnostic coordinator. Every catalog entry and result envelope SHALL carry the source agent's validated contract version and package digest. The coordinator SHALL apply the supplied per-agent coordination policy without requiring its prompt or orchestration code to name every registered reviewer role.
 
-#### Scenario: Registered agents emit findings
+#### Scenario: Findings from two agents
 - **WHEN** any registered reviewers emit findings
 - **THEN** the coordinator receives those findings with the source agent name, validated contract version, package digest, and matching coordination policy
 
-#### Scenario: Successful agent produced no findings
+#### Scenario: New agents emit findings
+- **WHEN** the tests or safety agent emits findings
+- **THEN** the coordinator receives those findings together with findings from the successful correctness and API-reality agents
+
+#### Scenario: One agent produced no findings
 - **WHEN** one or more successful registered reviewers returns a valid empty findings list
 - **THEN** the coordinator still receives every successful agent result and processes the combined findings that remain
 
@@ -45,6 +49,8 @@ The system SHALL pass the catalog entry and attributed result from every selecte
 #### Scenario: Coordinator receives an unknown source
 - **WHEN** a raw result names an agent absent from the generated catalog or its contract version or package digest differs from the catalog
 - **THEN** coordination fails before GitHub posting rather than treating the result as trusted
+
+## ADDED Requirements
 
 ### Requirement: Preserve the Phase 2 built-in review coverage
 The built-in registry SHALL contain correctness, API-reality, tests, safety, and coordinator agents with their Phase 2 prompts, input boundaries, and shared structured-output behavior. Built-in agents MAY add Agent Skills later without changing their identity as agents.
