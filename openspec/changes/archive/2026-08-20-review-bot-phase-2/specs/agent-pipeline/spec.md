@@ -5,7 +5,7 @@ This delta expands the existing Phase 1 pipeline rather than introducing a new p
 ### Requirement: Run review agents concurrently
 The system SHALL run the correctness, API-reality, tests, and safety review agents concurrently for every review.
 
-#### Scenario: All Phase 2 agents start
+#### Scenario: Both agents start
 - **WHEN** the agent pipeline begins
 - **THEN** the correctness, API-reality, tests, and safety agents all receive their inputs and run in parallel
 
@@ -16,11 +16,15 @@ The system SHALL run the correctness, API-reality, tests, and safety review agen
 ### Requirement: Feed all findings to the coordinator
 The system SHALL pass the findings from every successful correctness, API-reality, tests, and safety review agent to the coordinator.
 
+#### Scenario: Findings from two agents
+- **WHEN** both the correctness agent and the API-reality agent emit findings
+- **THEN** the coordinator receives the combined set
+
 #### Scenario: New agents emit findings
 - **WHEN** the tests or safety agent emits findings
 - **THEN** the coordinator receives those findings together with findings from the successful correctness and API-reality agents
 
-#### Scenario: Successful agent produced no findings
+#### Scenario: One agent produced no findings
 - **WHEN** one or more successful review agents returns a valid empty findings list
 - **THEN** the coordinator still receives every successful agent result and processes the combined findings that remain
 
