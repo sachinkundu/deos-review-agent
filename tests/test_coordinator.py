@@ -10,6 +10,7 @@ from review_bot.agents.registry import discover_agent_registry
 from review_bot.agents.runner import AgentResult, AgentSpec
 from review_bot.coordinator import (
     CoordinatorError,
+    attribute_final_findings,
     run_coordinator,
     validate_result_identities,
     write_raw_findings,
@@ -116,3 +117,45 @@ def test_result_identities_must_match_selected_registry():
     results[0].package_digest = "sha256:tampered"
     with pytest.raises(CoordinatorError, match="identity mismatch"):
         validate_result_identities(registry, results)
+
+
+def test_final_finding_source_is_derived_from_raw_reviewer_result():
+    raw = make_finding(title="Concrete bug", path="src/a.py", start=4, end=4)
+    final = make_finding(title="Concrete bug", path="src/a.py", start=4, end=4)
+    final["source_agent"] = "safety"
+    review = make_review(findings=[final])
+    results = [
+        AgentResult(name="correctness", ok=True, output=make_review(findings=[raw])),
+        AgentResult(name="safety", ok=True, output=make_review(findings=[])),
+    ]
+
+    attribute_final_findings(review, results)
+
+    assert review["findings"][0]["source_agent"] == "correctness"
+
+
+def test_duplicate_raw_sources_use_trusted_result_order():
+    raw = make_finding(title="Concrete bug", path="src/a.py", start=4, end=4)
+    final = make_finding(title="Concrete bug", path="src/a.py", start=4, end=4)
+    final["source_agent"] = "safety"
+    review = make_review(findings=[final])
+    results = [
+        AgentResult(name="correctness", ok=True, output=make_review(findings=[raw])),
+        AgentResult(name="safety", ok=True, output=make_review(findings=[raw])),
+    ]
+
+    attribute_final_findings(review, results)
+
+    assert review["findings"][0]["source_agent"] == "correctness"
+
+
+def test_final_finding_without_raw_reviewer_source_is_rejected():
+    final = make_finding(title="Invented bug", path="src/missing.py", start=9, end=9)
+    final["source_agent"] = "correctness"
+    review = make_review(findings=[final])
+    results = [
+        AgentResult(name="correctness", ok=True, output=make_review(findings=[])),
+    ]
+
+    with pytest.raises(CoordinatorError, match="no raw reviewer source"):
+        attribute_final_findings(review, results)

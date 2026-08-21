@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..schema import SchemaError, load_schema, validate_review_output
+from ..schema import SchemaError, load_schema, validate_against_schema, validate_review_output
 from .registry import AgentSkill, package_digest
 
 DEFAULT_AGENT_TIMEOUT = 1800
@@ -65,7 +65,10 @@ def _extract_json(text: str) -> dict:
 
 def _validate(spec: AgentSpec, data: dict, duration_seconds: float = 0.0) -> AgentResult:
     try:
-        validate_review_output(data)
+        if spec.output_schema is None:
+            validate_review_output(data)
+        else:
+            validate_against_schema(data, spec.output_schema)
     except SchemaError as e:
         return AgentResult(
             name=spec.name,
@@ -103,6 +106,9 @@ class AgentResult:
     @property
     def summary(self) -> str:
         if self.ok:
+            if self.output and "classifications" in self.output:
+                count = len(self.output["classifications"])
+                return f"completed with {count} classification(s)"
             count = len(self.output.get("findings", [])) if self.output else 0
             return f"completed with {count} finding(s)"
         return f"failed: {self.error}"
@@ -119,6 +125,7 @@ class AgentSpec:
     package_digest: str = ""
     skills: tuple[AgentSkill, ...] = ()
     package_dir: Path | None = None
+    output_schema: dict[str, Any] | None = None
 
 
 class AgentRunner:
@@ -450,6 +457,10 @@ class CodexAgentRunner(AgentRunner):
         started = time.monotonic()
         out_file = self._tmpdir / f"{spec.name}.json"
         out_file.unlink(missing_ok=True)
+        schema_file = self._schema_file
+        if spec.output_schema is not None:
+            schema_file = self._tmpdir / f"{spec.name}-output.schema.json"
+            schema_file.write_text(json.dumps(spec.output_schema), encoding="utf-8")
         staged_skills = workdir / ".agents" / "skills"
         for skill in spec.skills:
             shutil.copytree(skill.skill_dir, staged_skills / skill.name)
@@ -469,7 +480,7 @@ class CodexAgentRunner(AgentRunner):
             "--ignore-user-config",
             "--ignore-rules",
             "--output-schema",
-            str(self._schema_file),
+            str(schema_file),
             "-o",
             str(out_file),
             "--ephemeral",
@@ -734,6 +745,7 @@ class PiAgentRunner(AgentRunner):
             spec.package_digest,
             spec.skills,
             spec.package_dir,
+            spec.output_schema,
         )
         remaining = max(0.0, self.timeout - (time.monotonic() - started))
         repaired = self._run_once(

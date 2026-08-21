@@ -111,10 +111,17 @@ def sample_diff() -> str:
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: object | None = None, text: str | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        payload: object | None = None,
+        text: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status_code
         self._payload = payload
         self._text = text
+        self.headers = headers or {}
 
     def json(self) -> object:
         if self._payload is None:

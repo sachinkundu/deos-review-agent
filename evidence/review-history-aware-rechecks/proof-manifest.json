@@ -1,0 +1,72 @@
+{
+  "contract": "review-history-aware-recheck-proof/v1",
+  "captured_at": "2026-08-21",
+  "repository": "sachinkundu/deos-review-agent-eval",
+  "pull_request": 3,
+  "pull_request_url": "https://github.com/sachinkundu/deos-review-agent-eval/pull/3",
+  "stale_history_guard": {
+    "run_id": "4fd46c3010fc4db78a0db7ee5fbc7593",
+    "head_sha": "040f58c2f91781b7853b837d8a85f9981f2b1fe9",
+    "expected_history_digest": "sha256:c95ab7570f7cabd10c3de05fb82bebbea6041c82d762a7547398b488c2b94cb3",
+    "actual_history_digest": "sha256:6be2b6a52e0dd8380ccbcadbf6e67e0c930b86c04fb1e7c2218c0548ecaf419e",
+    "exit_code": 5,
+    "mutation": "none"
+  },
+  "initial": {
+    "head_sha": "040f58c2f91781b7853b837d8a85f9981f2b1fe9",
+    "history_digest": "sha256:6be2b6a52e0dd8380ccbcadbf6e67e0c930b86c04fb1e7c2218c0548ecaf419e",
+    "dry_run_id": "ed4fd485a2b1402d8ed38f6a2d002880",
+    "post_run_id": "5abb108c61114a0aa52f537d3b1af909",
+    "provider_readback_run_id": "rbr_e30b7778c6465572e2fec3d327f57962",
+    "review": {
+      "id": 4990960879,
+      "state": "CHANGES_REQUESTED",
+      "url": "https://github.com/sachinkundu/deos-review-agent-eval/pull/3#pullrequestreview-4990960879"
+    },
+    "finding": {
+      "finding_id": "rbf_541e03f895711691b4d1a858643982b0",
+      "provider_id": 3828363742,
+      "provider_url": "https://github.com/sachinkundu/deos-review-agent-eval/pull/3#discussion_r3828363742",
+      "path": "eval_set/recheck/delete_policy.py",
+      "line_at_post": 6,
+      "current_line_after_head_advance": null,
+      "original_line": 6,
+      "side": "RIGHT",
+      "commit_id": "040f58c2f91781b7853b837d8a85f9981f2b1fe9",
+      "original_commit_id": "040f58c2f91781b7853b837d8a85f9981f2b1fe9"
+    }
+  },
+  "recheck": {
+    "head_sha": "f8e3e847319aa7c500ac11ce40a400013be1e538",
+    "history_digest": "sha256:4daf6a7cc028072647f8fb302ac2159b51ea03494a7f5dcad414d86d61f86350",
+    "dry_run_id": "98c3c8e1cd4f471ea080206291c961f9",
+    "post_run_id": "b75795c279e1446e932de2f027c64580",
+    "classification": "fixed",
+    "action": {
+      "action_id": "rba_119e2fcf5823b6eb37df8a7876222741",
+      "surface": "review_reply",
+      "target_provider_id": 3828363742,
+      "provider_id": 3828423255,
+      "provider_url": "https://github.com/sachinkundu/deos-review-agent-eval/pull/3#discussion_r3828423255",
+      "in_reply_to_id": 3828363742,
+      "readback": "verified"
+    },
+    "thread": {
+      "id": "PRRT_kwDOT6wBGc6bE-4d",
+      "is_resolved": false
+    }
+  },
+  "identical_head_rerun": {
+    "selection": "no-op",
+    "elapsed_seconds": 3.519,
+    "mutation": "none",
+    "provider_comment_count_before": 2,
+    "provider_comment_count_after": 2,
+    "provider_comment_ids": [3828363742, 3828423255]
+  },
+  "redaction": {
+    "credentials_retained": false,
+    "agent_transcripts_retained": false,
+    "model_prompts_retained": false
+  }
+}

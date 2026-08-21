@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review recheck result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "classifications"],
+  "properties": {
+    "contract": {"const": "review-recheck-result/v1"},
+    "classifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "status", "evidence", "confidence_score"],
+        "properties": {
+          "finding_id": {"type": "string", "pattern": "^rbf_[0-9a-f]{32}$"},
+          "status": {"enum": ["fixed", "unfixed", "obsolete", "ambiguous"]},
+          "evidence": {"type": "string", "minLength": 1},
+          "confidence_score": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    }
+  }
+}

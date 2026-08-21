@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -12,7 +14,22 @@ from review_bot.agents.registry import AgentRegistry, discover_agent_registry, l
 from review_bot.agents.runner import AgentResult
 from review_bot.diff_filter import DiffFilterError
 from review_bot.github import Credentials, GitHubAppClient, GitHubError, PRInfo
-from review_bot.review import build_review_body, run_cleanup, run_review, run_status
+from review_bot.history import (
+    action_identity,
+    build_history_snapshot,
+    finding_identity,
+    finding_marker,
+    run_identity,
+    run_marker,
+)
+from review_bot.progress import ProgressController
+from review_bot.review import (
+    _finish_recheck,
+    build_review_body,
+    run_cleanup,
+    run_review,
+    run_status,
+)
 from review_bot.workspace import PRWorkspace
 from tests.conftest import FakeAgentRunner, make_finding, make_review
 
@@ -54,6 +71,8 @@ class FakeGitHubClient(GitHubAppClient):
         self.diff = diff
         self.posted = posted
         self._token = "install-token"
+        self._created_review: dict | None = None
+        self._created_comments: list[dict] = []
 
     def mint_app_jwt(self) -> str:
         return "jwt"
@@ -67,15 +86,52 @@ class FakeGitHubClient(GitHubAppClient):
     def fetch_pr_diff(self, owner: str, repo: str, number: int, token: str | None = None) -> str:
         return self.diff
 
+    def fetch_complete_history(self, owner, repo, number, head_sha, token):
+        return build_history_snapshot(
+            repository=f"{owner}/{repo}",
+            pull_number=number,
+            head_sha=head_sha,
+            reviews=[],
+            review_comments=[],
+            issue_comments=[],
+            review_threads=[],
+            resolution_source="graphql",
+            fetched_at="2026-08-21T00:00:00Z",
+        )
+
     def post_review(self, owner, repo, number, commit_id, event, body, comments, token=None):
         self.posted.append(
             {"event": event, "body": body, "comments": comments, "commit_id": commit_id}
         )
+        self._created_review = {
+            "id": 99,
+            "body": body,
+            "user": {"login": self._creds.bot_username},
+            "html_url": "https://github.com/owner/repo/pull/7#pullrequestreview-99",
+        }
+        self._created_comments = [
+            {
+                "id": 100 + index,
+                "body": comment["body"],
+                "user": {"login": self._creds.bot_username},
+                "pull_request_review_id": 99,
+                "in_reply_to_id": None,
+                "html_url": f"https://github.com/owner/repo/pull/7#discussion_r{100 + index}",
+            }
+            for index, comment in enumerate(comments)
+        ]
         return {
             "id": 99,
             "state": event,
             "html_url": "https://github.com/owner/repo/pull/7#pullrequestreview-99",
         }
+
+    def fetch_review(self, owner, repo, number, review_id, token):
+        assert self._created_review is not None
+        return self._created_review
+
+    def fetch_review_comments_for_review(self, owner, repo, number, review_id, token):
+        return self._created_comments
 
 
 class FakeWorkspace(PRWorkspace):
@@ -1646,3 +1702,348 @@ def test_real_cleanup_removes_progress_snapshot(tmp_path: Path, sample_diff, cap
     assert events[-2]["state"] == "succeeded"
     assert events[-1]["message"] == "run finished"
     assert not workspace.workdir.exists()
+
+
+def test_recheck_posts_verified_reply_and_identical_rerun_is_noop(tmp_path: Path, sample_diff):
+    old_head = "a" * 40
+    new_head = "b" * 40
+    finding = make_finding(
+        title="Off-by-one in pagination",
+        path="src/widget/paginate.py",
+        start=9,
+        end=9,
+    )
+    finding_id = finding_identity(finding, old_head, "correctness")
+    owned_run = run_identity("owner/repo", 7, old_head)
+    reviews = [
+        {
+            "id": 50,
+            "node_id": "R_50",
+            "body": run_marker(owned_run, old_head),
+            "state": "COMMENTED",
+            "commit_id": old_head,
+            "submitted_at": "2026-08-21T00:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/7#pullrequestreview-50",
+            "user": {"login": "review-bot[bot]"},
+        }
+    ]
+    comments = [
+        {
+            "id": 60,
+            "node_id": "C_60",
+            "body": finding["body"] + "\n\n" + finding_marker(finding_id, old_head, "correctness"),
+            "pull_request_review_id": 50,
+            "in_reply_to_id": None,
+            "path": "src/widget/paginate.py",
+            "line": 9,
+            "side": "RIGHT",
+            "created_at": "2026-08-21T00:00:01Z",
+            "updated_at": "2026-08-21T00:00:01Z",
+            "html_url": "https://github.com/owner/repo/pull/7#discussion_r60",
+            "user": {"login": "review-bot[bot]"},
+        }
+    ]
+    posted_replies: list[dict] = []
+
+    class RecheckClient(FakeGitHubClient):
+        def fetch_complete_history(self, owner, repo, number, head_sha, token):
+            return build_history_snapshot(
+                repository=f"{owner}/{repo}",
+                pull_number=number,
+                head_sha=head_sha,
+                reviews=reviews,
+                review_comments=comments,
+                issue_comments=[],
+                review_threads=[],
+                resolution_source="graphql",
+                fetched_at="2026-08-21T01:00:00Z",
+            )
+
+        def post_review_reply(self, owner, repo, number, top_level_comment_id, body, token):
+            created = {
+                "id": 61,
+                "node_id": "C_61",
+                "body": body,
+                "pull_request_review_id": 50,
+                "in_reply_to_id": top_level_comment_id,
+                "path": "src/widget/paginate.py",
+                "line": 9,
+                "side": "RIGHT",
+                "created_at": "2026-08-21T01:00:01Z",
+                "updated_at": "2026-08-21T01:00:01Z",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r61",
+                "user": {"login": "review-bot[bot]"},
+            }
+            comments.append(created)
+            posted_replies.append(created)
+            return created
+
+        def fetch_review_comment(self, owner, repo, comment_id, token):
+            return next(item for item in comments if item["id"] == comment_id)
+
+    client: RecheckClient | None = None
+
+    def client_factory(creds):
+        nonlocal client
+        if client is None:
+            client = RecheckClient(
+                creds,
+                _make_pr(head_sha=new_head),
+                sample_diff,
+                [],
+            )
+        return client
+
+    fixed = {
+        "contract": "review-recheck-result/v1",
+        "classifications": [
+            {
+                "finding_id": finding_id,
+                "status": "fixed",
+                "evidence": "The current head subtracts one before calculating the page offset.",
+                "confidence_score": 0.98,
+            }
+        ],
+    }
+    empty = {"contract": "review-recheck-result/v1", "classifications": []}
+    runner = FakeAgentRunner(
+        {
+            "correctness": fixed,
+            "api-reality": empty,
+            "tests": empty,
+            "safety": empty,
+            "coordinator": fixed,
+        }
+    )
+    first_workspace = FakeWorkspace(tmp_path / "first", "owner", "repo", 7)
+    first = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path / "first"),
+        ],
+        client_factory=client_factory,
+        runner_factory=lambda **kwargs: runner,
+        workspace_factory=lambda *args, **kwargs: first_workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+    assert first == 0
+    assert len(posted_replies) == 1
+    assert posted_replies[0]["in_reply_to_id"] == 60
+    expected_action = action_identity(finding_id, new_head, "fixed")
+    assert expected_action in posted_replies[0]["body"]
+    readback = json.loads((first_workspace.artifact_dir / "provider-readback.json").read_text())
+    assert readback["outcome"] == "verified"
+    assert readback["actions"][0]["provider_id"] == 61
+    retained_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in first_workspace.artifact_dir.rglob("*")
+        if path.is_file()
+    )
+    assert "install-token" not in retained_text
+
+    second_workspace = FakeWorkspace(tmp_path / "second", "owner", "repo", 7)
+    second = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path / "second"),
+        ],
+        client_factory=client_factory,
+        runner_factory=lambda **kwargs: pytest.fail("no-op rerun started an agent"),
+        workspace_factory=lambda *args, **kwargs: second_workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+    assert second == 0
+    assert len(posted_replies) == 1
+    assert not second_workspace.workdir.exists()
+
+
+def test_conversation_change_after_agents_retains_stale_result_without_post(
+    tmp_path: Path, sample_diff
+):
+    class ConversationStaleClient(FakeGitHubClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.history_reads = 0
+
+        def fetch_complete_history(self, owner, repo, number, head_sha, token):
+            self.history_reads += 1
+            issue_comments = []
+            if self.history_reads > 1:
+                issue_comments = [
+                    {
+                        "id": 900,
+                        "node_id": "I_900",
+                        "body": "A human comment arrived during review.",
+                        "created_at": "2026-08-21T01:00:00Z",
+                        "updated_at": "2026-08-21T01:00:00Z",
+                        "html_url": "https://github.com/owner/repo/pull/7#issuecomment-900",
+                        "user": {"login": "human"},
+                    }
+                ]
+            return build_history_snapshot(
+                repository=f"{owner}/{repo}",
+                pull_number=number,
+                head_sha=head_sha,
+                reviews=[],
+                review_comments=[],
+                issue_comments=issue_comments,
+                review_threads=[],
+                resolution_source="graphql",
+                fetched_at="2026-08-21T00:00:00Z",
+            )
+
+    posted: list[dict] = []
+    workspace = FakeWorkspace(tmp_path, "owner", "repo", 7)
+    exit_code = run_review(
+        [
+            "https://github.com/owner/repo/pull/7",
+            "--keep-workspace",
+            "--progress",
+            "off",
+            "--workspace-root",
+            str(tmp_path),
+        ],
+        client_factory=lambda creds: ConversationStaleClient(
+            creds, _make_pr(), sample_diff, posted
+        ),
+        runner_factory=_make_runner_factory(make_review(findings=[])),
+        workspace_factory=lambda *args, **kwargs: workspace,
+        diff_artifact_writer=_fake_diff_artifact_writer,
+    )
+    assert exit_code == 5
+    assert posted == []
+    assert (workspace.artifact_dir / "unposted-review.json").exists() is False
+    assert (workspace.artifact_dir / "stale-result.json").exists()
+
+
+def test_multi_action_recheck_stops_after_unexpected_conversation_change(tmp_path: Path):
+    head = "b" * 40
+    finding_ids = ["rbf_" + "1" * 32, "rbf_" + "2" * 32]
+    raw_comments = [
+        {
+            "id": 60 + index,
+            "node_id": f"C_{60 + index}",
+            "body": f"Prior finding {index}",
+            "pull_request_review_id": 50,
+            "in_reply_to_id": None,
+            "path": f"src/{index}.py",
+            "line": 3,
+            "side": "RIGHT",
+            "created_at": f"2026-08-21T00:00:0{index}Z",
+            "updated_at": f"2026-08-21T00:00:0{index}Z",
+            "html_url": f"https://github.com/owner/repo/pull/7#discussion_r{60 + index}",
+            "user": {"login": "review-bot[bot]"},
+        }
+        for index in range(2)
+    ]
+    issue_comments: list[dict] = []
+    posted: list[dict] = []
+    pr = _make_pr(head_sha=head)
+
+    class PartialClient(FakeGitHubClient):
+        def fetch_complete_history(self, owner, repo, number, head_sha, token):
+            return build_history_snapshot(
+                repository=f"{owner}/{repo}",
+                pull_number=number,
+                head_sha=head_sha,
+                reviews=[],
+                review_comments=raw_comments,
+                issue_comments=issue_comments,
+                review_threads=[],
+                resolution_source="graphql",
+                fetched_at="2026-08-21T00:00:00Z",
+            )
+
+        def post_review_reply(self, owner, repo, number, top_level_comment_id, body, token):
+            created = {
+                "id": 70 + len(posted),
+                "node_id": f"C_{70 + len(posted)}",
+                "body": body,
+                "pull_request_review_id": 50,
+                "in_reply_to_id": top_level_comment_id,
+                "path": "src/0.py",
+                "line": 3,
+                "side": "RIGHT",
+                "created_at": "2026-08-21T01:00:00Z",
+                "updated_at": "2026-08-21T01:00:00Z",
+                "html_url": "https://github.com/owner/repo/pull/7#discussion_r70",
+                "user": {"login": "review-bot[bot]"},
+            }
+            raw_comments.append(created)
+            posted.append(created)
+            issue_comments.append(
+                {
+                    "id": 80,
+                    "node_id": "I_80",
+                    "body": "Concurrent human comment",
+                    "created_at": "2026-08-21T01:00:01Z",
+                    "updated_at": "2026-08-21T01:00:01Z",
+                    "html_url": "https://github.com/owner/repo/pull/7#issuecomment-80",
+                    "user": {"login": "human"},
+                }
+            )
+            return created
+
+        def fetch_review_comment(self, owner, repo, comment_id, token):
+            return next(item for item in raw_comments if item["id"] == comment_id)
+
+    client = PartialClient(
+        Credentials("1", "2", "/unused", bot_username="review-bot[bot]"),
+        pr,
+        "",
+        [],
+    )
+    original_history = client.fetch_complete_history("owner", "repo", 7, head, "tok")
+    targets = [
+        {
+            "finding_id": finding_id,
+            "surface": "review_comment",
+            "provider_id": 60 + index,
+            "top_level_comment_id": 60 + index,
+        }
+        for index, finding_id in enumerate(finding_ids)
+    ]
+    result = {
+        "contract": "review-recheck-result/v1",
+        "classifications": [
+            {
+                "finding_id": finding_id,
+                "status": "fixed",
+                "evidence": "The current head directly handles the prior failing case.",
+                "confidence_score": 0.95,
+            }
+            for finding_id in finding_ids
+        ],
+    }
+    progress = ProgressController("off")
+    try:
+        exit_code = _finish_recheck(
+            args=cast(Any, SimpleNamespace(pr_url="https://github.com/owner/repo/pull/7")),
+            opts=cast(Any, SimpleNamespace(dry_run=False)),
+            progress=progress,
+            client=client,
+            token="tok",
+            pr=pr,
+            owner="owner",
+            repo="repo",
+            number=7,
+            bot_username="review-bot[bot]",
+            history=original_history,
+            targets=targets,
+            result=result,
+            artifact_dir=tmp_path,
+        )
+    finally:
+        progress.close()
+    assert exit_code == 5
+    assert len(posted) == 1
+    readback = json.loads((tmp_path / "provider-readback.json").read_text())
+    assert readback["outcome"] == "partial_stale"
+    assert len(readback["actions"]) == 1

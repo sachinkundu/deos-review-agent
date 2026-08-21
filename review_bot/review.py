@@ -21,10 +21,11 @@ import os
 import sys
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
-from .agents.registry import RegistryError, discover_agent_registry
+from .agents.registry import InputResource, RegistryError, discover_agent_registry
 from .agents.runner import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_MAX_CONCURRENCY,
@@ -38,8 +39,10 @@ from .agents.runner import (
 )
 from .coordinator import (
     CoordinatorError,
+    attribute_final_findings,
     run_coordinator,
     validate_result_identities,
+    write_raw_classifications,
     write_raw_findings,
 )
 from .diff_filter import (
@@ -52,9 +55,22 @@ from .github import (
     CredentialsError,
     GitHubAppClient,
     GitHubError,
+    PRInfo,
     build_inline_comments,
     event_for_findings,
     parse_pr_url,
+)
+from .history import (
+    HistoryError,
+    build_reviewer_view,
+    parse_action_markers,
+    run_identity,
+    run_marker,
+    select_review_mode,
+    targets_document,
+    without_expected_actions,
+    write_history_snapshot,
+    write_targets,
 )
 from .progress import (
     SNAPSHOT_NAME,
@@ -65,13 +81,28 @@ from .progress import (
     format_status,
     read_snapshot,
 )
+from .recheck import (
+    PROVIDER_READBACK_NAME,
+    RECHECK_PLAN_NAME,
+    RECHECK_RESULT_NAME,
+    RecheckError,
+    coordinator_prompt,
+    mark_initial_findings,
+    plan_recheck_actions,
+    reviewer_prompt,
+    validate_closed_world,
+    verify_action_readback,
+    verify_initial_readback,
+    write_json_artifact,
+)
 from .resources import (
     ResourceError,
     ResourceResolver,
     validate_workspace_isolation,
+    write_recheck_resources,
     write_registry_artifacts,
 )
-from .schema import SchemaError, validate_review_output
+from .schema import SchemaError, load_named_schema, validate_review_output
 from .shared_context import write_shared_context
 from .workspace import (
     DEFAULT_BOOTSTRAP_TIMEOUT,
@@ -137,6 +168,7 @@ def build_review_body(
     agent_failures: list,
     unattachable: list[tuple[dict, str]],
     finding_count: int,
+    run_marker_text: str | None = None,
 ) -> str:
     """Assemble the review summary body (pass note, failures, unattached)."""
     lines: list[str] = ["## review-bot — automated correctness review", ""]
@@ -180,7 +212,13 @@ def build_review_body(
                 if fix.get("replacement"):
                     lines.append("")
                     lines.append(f"```\n{fix['replacement']}\n```")
+            if finding.get("_finding_marker"):
+                lines.append("")
+                lines.append(finding["_finding_marker"])
             lines.append("")
+
+    if run_marker_text:
+        lines.extend(["", run_marker_text])
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -303,6 +341,211 @@ def _skip_phases(
 ) -> None:
     for phase in phases:
         progress.phase(phase, State.SKIPPED, message, update_overall=update_overall)
+
+
+def _owned_action_ids(history: dict, bot_username: str) -> set[str]:
+    identities: set[str] = set()
+    for item in [*history["review_comments"], *history["issue_comments"]]:
+        if str(item.get("author") or "").casefold() != bot_username.casefold():
+            continue
+        identities.update(marker[0] for marker in parse_action_markers(item.get("body") or ""))
+    return identities
+
+
+def _finish_recheck(
+    *,
+    args: argparse.Namespace,
+    opts: RunOptions,
+    progress: ProgressController,
+    client: GitHubAppClient,
+    token: str,
+    pr: PRInfo,
+    owner: str,
+    repo: str,
+    number: int,
+    bot_username: str,
+    history: dict,
+    targets: list[dict],
+    result: dict,
+    artifact_dir: Path,
+) -> int:
+    progress.phase(Phase.SCHEMA_VALIDATION, State.RUNNING, "recheck schema validation running")
+    try:
+        validate_closed_world(
+            result,
+            {target["finding_id"] for target in targets},
+            require_complete=True,
+        )
+        write_json_artifact(artifact_dir, RECHECK_RESULT_NAME, result)
+        plan = plan_recheck_actions(
+            repository=f"{owner}/{repo}",
+            pull_number=number,
+            head_sha=pr.head_sha,
+            history_digest=history["digest"],
+            targets=targets,
+            result=result,
+        )
+        write_json_artifact(artifact_dir, RECHECK_PLAN_NAME, plan)
+    except RecheckError as e:
+        progress.phase(Phase.SCHEMA_VALIDATION, State.FAILED, "recheck schema invalid")
+        _skip_phases(
+            progress,
+            (Phase.DIFF_VALIDATION, Phase.HEAD_FRESHNESS, Phase.PAYLOAD, Phase.POSTING),
+            "recheck result invalid",
+            update_overall=False,
+        )
+        print(f"error: {e}", file=sys.stderr)
+        return 7
+    progress.phase(Phase.SCHEMA_VALIDATION, State.SUCCEEDED, "recheck schema valid")
+    progress.phase(
+        Phase.DIFF_VALIDATION,
+        State.SKIPPED,
+        "recheck creates no new diff-line comments",
+    )
+
+    progress.phase(Phase.HEAD_FRESHNESS, State.RUNNING, "head and conversation recheck running")
+    try:
+        fresh_pr = client.fetch_pr(owner, repo, number, token)
+        fresh_history = client.fetch_complete_history(owner, repo, number, fresh_pr.head_sha, token)
+    except GitHubError as e:
+        progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "freshness recheck failed")
+        _skip_phases(
+            progress,
+            (Phase.PAYLOAD, Phase.POSTING),
+            "freshness unavailable",
+            update_overall=False,
+        )
+        print(f"error: freshness re-check failed: {e}", file=sys.stderr)
+        return 6
+    if fresh_pr.head_sha != pr.head_sha or fresh_history["digest"] != history["digest"]:
+        progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "head or conversation changed")
+        _skip_phases(
+            progress,
+            (Phase.PAYLOAD, Phase.POSTING),
+            "recheck inputs changed",
+            update_overall=False,
+        )
+        stale = {
+            "contract": "review-stale-result/v1",
+            "expected_head": pr.head_sha,
+            "actual_head": fresh_pr.head_sha,
+            "expected_history_digest": history["digest"],
+            "actual_history_digest": fresh_history["digest"],
+        }
+        write_json_artifact(artifact_dir, "stale-result.json", stale)
+        print("error: PR head or conversation changed before recheck posting; posted nothing.")
+        return 5
+    progress.phase(Phase.HEAD_FRESHNESS, State.SUCCEEDED, "head and conversation unchanged")
+    progress.phase(Phase.PAYLOAD, State.RUNNING, "recheck plan retention running")
+    progress.phase(Phase.PAYLOAD, State.SUCCEEDED, "recheck plan retained")
+    print(
+        f"recheck ready: targets={len(targets)} actions={len(plan['actions'])} "
+        f"ambiguous={len(targets) - len(plan['actions'])}"
+    )
+    if opts.dry_run:
+        progress.phase(Phase.POSTING, State.SKIPPED, "dry run does not post")
+        print("dry-run: recheck classification and action plan retained; no GitHub mutation.")
+        return 0
+    if not plan["actions"]:
+        progress.phase(Phase.POSTING, State.SKIPPED, "ambiguous recheck has no mutation")
+        print("recheck complete: every target was ambiguous; no GitHub mutation permitted.")
+        return 0
+
+    progress.phase(Phase.POSTING, State.RUNNING, "recheck status posting running")
+    completed_ids: set[str] = set()
+    readbacks: list[dict] = []
+    for action in plan["actions"]:
+        try:
+            guard_pr = client.fetch_pr(owner, repo, number, token)
+            guard_history = client.fetch_complete_history(
+                owner, repo, number, guard_pr.head_sha, token
+            )
+        except GitHubError as e:
+            progress.phase(Phase.POSTING, State.FAILED, "per-action freshness failed")
+            print(f"error: per-action freshness failed: {e}", file=sys.stderr)
+            return 6
+        existing_ids = _owned_action_ids(guard_history, bot_username)
+        if action["action_id"] in existing_ids:
+            completed_ids.add(action["action_id"])
+            readbacks.append(
+                {
+                    "action_id": action["action_id"],
+                    "finding_id": action["finding_id"],
+                    "outcome": "already_verified",
+                }
+            )
+            continue
+        comparable = without_expected_actions(guard_history, completed_ids)
+        if guard_pr.head_sha != pr.head_sha or comparable["digest"] != history["digest"]:
+            progress.phase(Phase.POSTING, State.FAILED, "conversation changed during plan")
+            write_json_artifact(
+                artifact_dir,
+                PROVIDER_READBACK_NAME,
+                {
+                    "contract": "review-provider-readback/v1",
+                    "outcome": "partial_stale",
+                    "actions": readbacks,
+                },
+            )
+            print("error: conversation changed during recheck plan; stopped remaining actions.")
+            return 5
+        try:
+            if action["surface"] == "review_reply":
+                created = client.post_review_reply(
+                    owner,
+                    repo,
+                    number,
+                    action["target_provider_id"],
+                    action["body"],
+                    token,
+                )
+                provider = client.fetch_review_comment(owner, repo, created["id"], token)
+            else:
+                created = client.post_issue_comment(owner, repo, number, action["body"], token)
+                provider = client.fetch_issue_comment(owner, repo, created["id"], token)
+            verified = verify_action_readback(
+                provider=provider,
+                bot_login=bot_username,
+                action=action,
+                pull_number=number,
+            )
+        except (GitHubError, KeyError, RecheckError) as e:
+            readbacks.append(
+                {
+                    "action_id": action["action_id"],
+                    "finding_id": action["finding_id"],
+                    "outcome": "indeterminate",
+                    "error": str(e),
+                }
+            )
+            write_json_artifact(
+                artifact_dir,
+                PROVIDER_READBACK_NAME,
+                {
+                    "contract": "review-provider-readback/v1",
+                    "outcome": "indeterminate",
+                    "actions": readbacks,
+                },
+            )
+            progress.phase(Phase.POSTING, State.FAILED, "provider read-back indeterminate")
+            print(
+                f"error: provider accepted or attempted an action that could not be verified: {e}"
+            )
+            return 6
+        completed_ids.add(action["action_id"])
+        readbacks.append(verified)
+        write_json_artifact(
+            artifact_dir,
+            PROVIDER_READBACK_NAME,
+            {
+                "contract": "review-provider-readback/v1",
+                "outcome": "verified",
+                "actions": readbacks,
+            },
+        )
+    progress.phase(Phase.POSTING, State.SUCCEEDED, "recheck statuses verified")
+    print(f"recheck posted and verified: actions={len(readbacks)} on {args.pr_url}")
+    return 0
 
 
 def run_review(
@@ -446,10 +689,36 @@ def _run_review_pipeline(
     progress.phase(Phase.PROVIDER_DIFF, State.RUNNING, "provider diff loading")
     try:
         diff_text = client.fetch_pr_diff(owner, repo, number, token)
+        history = client.fetch_complete_history(owner, repo, number, pr.head_sha, token)
+        selection = select_review_mode(history, bot_username, pr.head_sha)
     except GitHubError as e:
-        progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff unavailable")
+        progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider diff or history unavailable")
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except HistoryError as e:
+        progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "provider history invalid")
+        print(f"error: provider history invalid: {e}", file=sys.stderr)
+        return 1
+    if selection.mode == "noop":
+        progress.phase(Phase.PROVIDER_DIFF, State.SUCCEEDED, "provider history selected no-op")
+        _skip_phases(
+            progress,
+            (
+                Phase.WORKSPACE,
+                Phase.BOOTSTRAP,
+                Phase.REVIEWERS,
+                Phase.COORDINATION,
+                Phase.SCHEMA_VALIDATION,
+                Phase.DIFF_VALIDATION,
+                Phase.HEAD_FRESHNESS,
+                Phase.PAYLOAD,
+                Phase.POSTING,
+                Phase.CLEANUP,
+            ),
+            "review head already evaluated",
+        )
+        print(f"no-op: {selection.reason}; no GitHub mutation planned.")
+        return 0
     provider_diff_settled = False
     try:
         progress.phase(Phase.WORKSPACE, State.RUNNING, "exact-head workspace setup running")
@@ -471,6 +740,7 @@ def _run_review_pipeline(
             coordinator_name=registry.coordinator.name,
             timeout_seconds=opts.agent_timeout,
         )
+        write_history_snapshot(workspace.artifact_dir, history)
         progress.phase(Phase.WORKSPACE, State.SUCCEEDED, "exact-head workspace ready")
 
         progress.phase(Phase.BOOTSTRAP, State.RUNNING, "repository bootstrap running")
@@ -509,13 +779,13 @@ def _run_review_pipeline(
 
         try:
             if diff_artifact_writer is write_diff_artifacts:
-                diff_artifact_writer(
+                _diff_artifacts = diff_artifact_writer(
                     workspace.artifact_dir,
                     diff_text,
                     repository=workspace.source_dir,
                 )
             else:
-                diff_artifact_writer(workspace.artifact_dir, diff_text)
+                _diff_artifacts = diff_artifact_writer(workspace.artifact_dir, diff_text)
             write_shared_context(workspace.artifact_dir, pr, bootstrap)
         except DiffFilterError as e:
             progress.phase(Phase.PROVIDER_DIFF, State.FAILED, "diff artifact construction failed")
@@ -575,19 +845,85 @@ def _run_review_pipeline(
         resolver = ResourceResolver(workspace.source_dir, workspace.artifact_dir)
         try:
             write_registry_artifacts(workspace.artifact_dir, registry, harness)
+            reviewer_assignments: dict[str, list[dict]] = {
+                agent.name: [] for agent in registry.reviewers
+            }
+            invocation_agents = registry.reviewers
+            recheck_schema = load_named_schema("recheck_schema.json")
+            if selection.mode == "recheck":
+                target_doc = targets_document(selection, history)
+                write_targets(workspace.artifact_dir, target_doc)
+                reviewer_names = set(reviewer_assignments)
+                fallback_reviewer = registry.reviewers[0].name
+                for target_item in selection.targets:
+                    assigned_name = str(target_item.get("source_agent") or fallback_reviewer)
+                    if assigned_name not in reviewer_names:
+                        assigned_name = fallback_reviewer
+                    reviewer_assignments[assigned_name].append(target_item)
+                try:
+                    filter_manifest = json.loads(
+                        (workspace.artifact_dir / "diff-filter.json").read_text(encoding="utf-8")
+                    )
+                    excluded_paths = {
+                        item["path"] for item in filter_manifest.get("exclusions", [])
+                    }
+                    reviewer_views = {
+                        agent.name: build_reviewer_view(
+                            history,
+                            list(selection.targets),
+                            reviewer=agent.name,
+                            excluded_paths=excluded_paths,
+                            include_excluded=agent.name == "safety",
+                        )
+                        for agent in registry.reviewers
+                    }
+                except (OSError, ValueError, KeyError, HistoryError) as e:
+                    raise ResourceError(f"recheck history view construction failed: {e}") from e
+                head_evidence = {
+                    "contract": "review-current-head/v1",
+                    "repository": f"{owner}/{repo}",
+                    "pull_number": number,
+                    "head_sha": pr.head_sha,
+                    "history_digest": history["digest"],
+                    "provider_diff": "provider-diff.diff",
+                }
+                write_recheck_resources(
+                    workspace.artifact_dir,
+                    reviewer_views,
+                    reviewer_assignments,
+                    head_evidence,
+                )
+                invocation_agents = tuple(
+                    replace(
+                        agent,
+                        inputs=(
+                            InputResource.RECHECK_HISTORY,
+                            InputResource.RECHECK_TARGETS,
+                            InputResource.CURRENT_HEAD_EVIDENCE,
+                        ),
+                    )
+                    for agent in registry.reviewers
+                )
             invocations: list[tuple[AgentSpec, Path]] = []
-            for agent in registry.reviewers:
+            for agent in invocation_agents:
                 capsule = resolver.create_capsule(agent)
+                target_ids = [
+                    target_item["finding_id"]
+                    for target_item in reviewer_assignments.get(agent.name, [])
+                ]
                 invocations.append(
                     (
                         AgentSpec(
                             name=agent.name,
-                            prompt=agent.prompt_text(),
+                            prompt=agent.prompt_text()
+                            if selection.mode == "initial"
+                            else reviewer_prompt(agent.name, target_ids),
                             input_files=capsule.input_files,
                             contract_version=agent.contract_version,
                             package_digest=agent.package_digest,
                             skills=agent.skills,
                             package_dir=agent.package_dir,
+                            output_schema=None if selection.mode == "initial" else recheck_schema,
                         ),
                         capsule.root,
                     )
@@ -611,7 +947,15 @@ def _run_review_pipeline(
 
             try:
                 validate_result_identities(registry, agent_results)
-            except CoordinatorError as e:
+                if selection.mode == "recheck":
+                    for result in agent_results:
+                        if result.ok and result.output is not None:
+                            validate_closed_world(
+                                result.output,
+                                {item["finding_id"] for item in reviewer_assignments[result.name]},
+                                require_complete=True,
+                            )
+            except (CoordinatorError, RecheckError) as e:
                 progress.phase(Phase.REVIEWERS, State.FAILED, "reviewer identity validation failed")
                 _skip_phases(
                     progress,
@@ -661,21 +1005,55 @@ def _run_review_pipeline(
 
             try:
                 progress.coordinator_started()
-                write_raw_findings(workspace.artifact_dir, agent_results)
-                coordinator = registry.coordinator
+                if selection.mode == "initial":
+                    write_raw_findings(workspace.artifact_dir, agent_results)
+                    coordinator = registry.coordinator
+                else:
+                    write_raw_classifications(workspace.artifact_dir, agent_results)
+                    coordinator = replace(
+                        registry.coordinator,
+                        inputs=(
+                            InputResource.CURRENT_HEAD_EVIDENCE,
+                            InputResource.REVIEW_HISTORY,
+                            InputResource.TARGET_CATALOG,
+                            InputResource.AGENT_CATALOG,
+                            InputResource.RAW_FINDINGS,
+                        ),
+                    )
                 capsule = resolver.create_capsule(coordinator)
                 spec = AgentSpec(
                     name=coordinator.name,
-                    prompt=coordinator.prompt_text(),
+                    prompt=coordinator.prompt_text()
+                    if selection.mode == "initial"
+                    else coordinator_prompt(
+                        [target_item["finding_id"] for target_item in selection.targets]
+                    ),
                     input_files=capsule.input_files,
                     contract_version=coordinator.contract_version,
                     package_digest=coordinator.package_digest,
                     skills=coordinator.skills,
                     package_dir=coordinator.package_dir,
+                    output_schema=None if selection.mode == "initial" else recheck_schema,
                 )
-                review = run_coordinator(runner, spec, capsule.root)
+                review = run_coordinator(
+                    runner, spec, capsule.root, recheck=selection.mode == "recheck"
+                )
+                if selection.mode == "recheck":
+                    validate_closed_world(
+                        review,
+                        {target_item["finding_id"] for target_item in selection.targets},
+                        require_complete=True,
+                    )
+                else:
+                    attribute_final_findings(review, agent_results)
                 progress.coordinator_settled(ok=True)
-            except (CoordinatorError, HarnessError, ResourceError, RegistryError) as e:
+            except (
+                CoordinatorError,
+                HarnessError,
+                RecheckError,
+                ResourceError,
+                RegistryError,
+            ) as e:
                 progress.coordinator_settled(
                     ok=False, timed_out=isinstance(e, CoordinatorError) and e.timed_out
                 )
@@ -715,6 +1093,24 @@ def _run_review_pipeline(
             if hasattr(runner, "close"):
                 runner.close()
 
+        if selection.mode == "recheck":
+            return _finish_recheck(
+                args=args,
+                opts=opts,
+                progress=progress,
+                client=client,
+                token=token,
+                pr=pr,
+                owner=owner,
+                repo=repo,
+                number=number,
+                bot_username=bot_username,
+                history=history,
+                targets=list(selection.targets),
+                result=review,
+                artifact_dir=workspace.artifact_dir,
+            )
+
         # Final payload validation before any GitHub POST.
         progress.phase(Phase.SCHEMA_VALIDATION, State.RUNNING, "review schema validation running")
         try:
@@ -735,15 +1131,39 @@ def _run_review_pipeline(
             print(f"error: {e}", file=sys.stderr)
             return 7
         progress.phase(Phase.SCHEMA_VALIDATION, State.SUCCEEDED, "review schema valid")
+        try:
+            marked_findings = mark_initial_findings(review, pr.head_sha)
+        except RecheckError as e:
+            progress.phase(Phase.SCHEMA_VALIDATION, State.FAILED, "finding identity invalid")
+            _skip_phases(
+                progress,
+                (
+                    Phase.DIFF_VALIDATION,
+                    Phase.HEAD_FRESHNESS,
+                    Phase.PAYLOAD,
+                    Phase.POSTING,
+                ),
+                "finding identity invalid",
+                update_overall=False,
+            )
+            print(f"error: {e}", file=sys.stderr)
+            return 7
+        posting_review = dict(review)
+        posting_review["findings"] = marked_findings
+        current_run_id = run_identity(f"{owner}/{repo}", number, pr.head_sha)
+        current_run_marker = run_marker(current_run_id, pr.head_sha)
 
         progress.phase(Phase.DIFF_VALIDATION, State.RUNNING, "diff line validation running")
-        outcome = validate_findings_locations(review["findings"], parse_unified_diff(diff_text))
+        outcome = validate_findings_locations(marked_findings, parse_unified_diff(diff_text))
         progress.phase(Phase.DIFF_VALIDATION, State.SUCCEEDED, "diff line validation succeeded")
 
         # Re-check the head SHA so we never post against a stale head.
         progress.phase(Phase.HEAD_FRESHNESS, State.RUNNING, "pull request head recheck running")
         try:
             fresh = client.fetch_pr(owner, repo, number, token)
+            fresh_history = client.fetch_complete_history(
+                owner, repo, number, fresh.head_sha, token
+            )
         except GitHubError as e:
             progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head recheck failed")
             _skip_phases(
@@ -754,26 +1174,52 @@ def _run_review_pipeline(
             )
             print(f"error: head re-check failed: {e}", file=sys.stderr)
             return 6
-        if fresh.head_sha != pr.head_sha:
-            progress.phase(Phase.HEAD_FRESHNESS, State.FAILED, "pull request head changed")
+        if fresh.head_sha != pr.head_sha or fresh_history["digest"] != history["digest"]:
+            progress.phase(
+                Phase.HEAD_FRESHNESS,
+                State.FAILED,
+                "pull request head or conversation changed",
+            )
             _skip_phases(
                 progress,
                 (Phase.PAYLOAD, Phase.POSTING),
-                "pull request head changed",
+                "pull request head or conversation changed",
                 update_overall=False,
             )
             print(
-                f"error: PR head changed from {pr.head_sha} to {fresh.head_sha} before posting; "
-                "refuse to post against a stale head. Re-run the review.",
+                "error: PR head or provider conversation changed before posting; "
+                "refuse to post stale review output. Re-run the review.",
                 file=sys.stderr,
             )
+            write_json_artifact(
+                workspace.artifact_dir,
+                "stale-result.json",
+                {
+                    "contract": "review-stale-result/v1",
+                    "expected_head": pr.head_sha,
+                    "actual_head": fresh.head_sha,
+                    "expected_history_digest": history["digest"],
+                    "actual_history_digest": fresh_history["digest"],
+                    "review": review,
+                },
+            )
             return 5
-        progress.phase(Phase.HEAD_FRESHNESS, State.SUCCEEDED, "pull request head unchanged")
+        progress.phase(
+            Phase.HEAD_FRESHNESS,
+            State.SUCCEEDED,
+            "pull request head and conversation unchanged",
+        )
 
         progress.phase(Phase.PAYLOAD, State.RUNNING, "review payload retention running")
-        event = event_for_findings(review["findings"])
+        event = event_for_findings(marked_findings)
         comments = build_inline_comments(outcome.attachable)
-        body = build_review_body(review, failures, outcome.unattachable, len(review["findings"]))
+        body = build_review_body(
+            posting_review,
+            failures,
+            outcome.unattachable,
+            len(marked_findings),
+            run_marker_text=current_run_marker,
+        )
         payload = {"commit_id": pr.head_sha, "event": event, "body": body, "comments": comments}
         (workspace.artifact_dir / UNPOSTED_REVIEW_NAME).write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -782,7 +1228,7 @@ def _run_review_pipeline(
         progress.phase(Phase.PAYLOAD, State.SUCCEEDED, "review payload retained")
 
         print(
-            f"review ready: event={event} findings={len(review['findings'])} "
+            f"review ready: event={event} findings={len(marked_findings)} "
             f"inline={len(comments)} unattached={len(outcome.unattachable)} "
             f"agents_failed={len(failures)}"
         )
@@ -798,12 +1244,34 @@ def _run_review_pipeline(
             posted = client.post_review(
                 owner, repo, number, pr.head_sha, event, body, comments, token
             )
-        except GitHubError as e:
+            provider_review = client.fetch_review(owner, repo, number, posted["id"], token)
+            provider_comments = client.fetch_review_comments_for_review(
+                owner, repo, number, posted["id"], token
+            )
+            readback = verify_initial_readback(
+                review=provider_review,
+                comments=provider_comments,
+                bot_login=bot_username,
+                run_id=current_run_id,
+                head_sha=pr.head_sha,
+                expected_finding_ids={item["_finding_id"] for item in marked_findings},
+            )
+            write_json_artifact(workspace.artifact_dir, PROVIDER_READBACK_NAME, readback)
+        except (GitHubError, KeyError, RecheckError) as e:
             progress.phase(Phase.POSTING, State.FAILED, "provider review posting failed")
-            print(f"error: {e}", file=sys.stderr)
+            write_json_artifact(
+                workspace.artifact_dir,
+                PROVIDER_READBACK_NAME,
+                {
+                    "contract": "review-provider-readback/v1",
+                    "outcome": "indeterminate",
+                    "error": str(e),
+                },
+            )
+            print(f"error: provider review posting/read-back failed: {e}", file=sys.stderr)
             return 6
         progress.set_review_url(posted.get("html_url"))
-        progress.phase(Phase.POSTING, State.SUCCEEDED, "provider review accepted")
+        progress.phase(Phase.POSTING, State.SUCCEEDED, "provider review accepted and verified")
         print(f"posted review {posted.get('id')} ({posted.get('state')}) on {args.pr_url}")
         print(f"review URL: {posted.get('html_url')}")
         return 0

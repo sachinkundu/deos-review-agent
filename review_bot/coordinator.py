@@ -51,6 +51,27 @@ def write_raw_findings(workdir: Path, results: list[AgentResult]) -> Path:
     return path
 
 
+def write_raw_classifications(workdir: Path, results: list[AgentResult]) -> Path:
+    """Write attributed closed-world classifications for the coordinator."""
+    agents = []
+    for result in results:
+        entry: dict = {
+            "agent": result.name,
+            "contract_version": result.contract_version,
+            "package_digest": result.package_digest,
+            "status": "completed" if result.ok else "failed",
+            "classifications": [],
+        }
+        if result.ok and result.output is not None:
+            entry["classifications"] = result.output.get("classifications", [])
+        else:
+            entry["error"] = result.error or "no output"
+        agents.append(entry)
+    path = workdir / RAW_FINDINGS_NAME
+    path.write_text(json.dumps({"agents": agents}, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def validate_result_identities(registry: AgentRegistry, results: list[AgentResult]) -> None:
     """Require a one-to-one identity match with every selected reviewer."""
     expected = {
@@ -66,7 +87,39 @@ def validate_result_identities(registry: AgentRegistry, results: list[AgentResul
             )
 
 
-def run_coordinator(runner: AgentRunner, spec: AgentSpec, workdir: Path) -> dict:
+def attribute_final_findings(review: dict, results: list[AgentResult]) -> None:
+    """Attach deterministic trusted source identities after coordination."""
+    candidates: list[tuple[str, dict]] = []
+    for result in results:
+        if not result.ok or result.output is None:
+            continue
+        candidates.extend((result.name, finding) for finding in result.output.get("findings", []))
+    for finding in review.get("findings", []):
+        location = finding.get("code_location") or {}
+        path = location.get("absolute_file_path")
+        line_range = location.get("line_range")
+        matches = [
+            (name, raw)
+            for name, raw in candidates
+            if (raw.get("code_location") or {}).get("absolute_file_path") == path
+            and (raw.get("code_location") or {}).get("line_range") == line_range
+        ]
+        title_matches = [
+            (name, raw)
+            for name, raw in matches
+            if str(raw.get("title") or "").casefold() == str(finding.get("title") or "").casefold()
+        ]
+        selected = title_matches or matches
+        if not selected:
+            raise CoordinatorError(
+                f"coordinator finding at {path!r} {line_range!r} has no raw reviewer source"
+            )
+        finding["source_agent"] = selected[0][0]
+
+
+def run_coordinator(
+    runner: AgentRunner, spec: AgentSpec, workdir: Path, *, recheck: bool = False
+) -> dict:
     """Run the coordinator and return its validated output.
 
     Raises CoordinatorError when the coordinator fails or its output does not
@@ -83,7 +136,10 @@ def run_coordinator(runner: AgentRunner, spec: AgentSpec, workdir: Path) -> dict
         raise CoordinatorError(f"coordinator failed: {result.error}", timed_out=result.timed_out)
     # The `status` field must survive the coordinator rewrite (it is used by
     # callers to detect whether further review passes are expected).
-    if result.output.get("status") not in ("no_further_concerns", "review_in_progress"):
+    if not recheck and result.output.get("status") not in (
+        "no_further_concerns",
+        "review_in_progress",
+    ):
         raise CoordinatorError(
             f"coordinator output lost a valid status field: {result.output.get('status')!r}"
         )

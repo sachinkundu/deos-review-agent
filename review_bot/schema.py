@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, cast
 
 import jsonschema
 
 SCHEMA_PATH = Path(__file__).parent / "schema.json"
+RECHECK_SCHEMA_PATH = Path(__file__).parent / "recheck_schema.json"
+HISTORY_SCHEMA_PATH = Path(__file__).parent / "history_schema.json"
+RECHECK_PLAN_SCHEMA_PATH = Path(__file__).parent / "recheck_plan_schema.json"
 
 
 class SchemaError(Exception):
@@ -29,6 +33,12 @@ class SchemaError(Exception):
 @lru_cache(maxsize=1)
 def load_schema() -> dict:
     with open(SCHEMA_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@lru_cache(maxsize=8)
+def load_named_schema(path: str) -> dict:
+    with open(Path(__file__).parent / path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -74,3 +84,24 @@ def validate_review_output(data: object) -> None:
 
     if problems:
         raise SchemaError(problems)
+
+
+def validate_against_schema(data: object, schema: dict) -> None:
+    """Validate an object against a strict JSON schema with stable diagnostics."""
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(cast(Any, data)), key=lambda e: list(e.absolute_path))
+    problems = [_format_location(error) for error in errors]
+    if problems:
+        raise SchemaError(problems)
+
+
+def validate_recheck_output(data: object) -> None:
+    validate_against_schema(data, load_named_schema(RECHECK_SCHEMA_PATH.name))
+
+
+def validate_history_snapshot(data: object) -> None:
+    validate_against_schema(data, load_named_schema(HISTORY_SCHEMA_PATH.name))
+
+
+def validate_recheck_plan(data: object) -> None:
+    validate_against_schema(data, load_named_schema(RECHECK_PLAN_SCHEMA_PATH.name))
