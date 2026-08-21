@@ -396,24 +396,31 @@ def select_review_mode(
                 latest_actions[finding_id] = (key, action_head, status)
 
     pending: list[dict[str, Any]] = []
-    evaluated_on_current = True
+    pending_evaluated_on_current = True
+    terminal_evaluated_on_current = False
     for finding_id, target in sorted(targets.items()):
         latest = latest_actions.get(finding_id)
         if latest is None:
-            evaluated_on_current = False
+            pending_evaluated_on_current = False
             pending.append(target)
             continue
         _key, action_head, status = latest
-        if action_head != current_head.lower():
-            evaluated_on_current = False
         if status in {"unfixed", "ambiguous"}:
             pending.append(target)
+            if action_head != current_head.lower():
+                pending_evaluated_on_current = False
+        elif action_head == current_head.lower():
+            terminal_evaluated_on_current = True
 
-    if evaluated_on_current:
+    if pending and pending_evaluated_on_current:
         return ReviewSelection(
             "noop", (), "every target was already evaluated on this head", run_id
         )
     if not pending:
+        if terminal_evaluated_on_current:
+            return ReviewSelection(
+                "noop", (), "every target was already evaluated on this head", run_id
+            )
         return ReviewSelection("initial", (), "the prior cycle is complete", run_id)
     return ReviewSelection(
         "recheck",

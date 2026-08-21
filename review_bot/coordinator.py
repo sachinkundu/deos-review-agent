@@ -94,10 +94,7 @@ def attribute_final_findings(review: dict, results: list[AgentResult]) -> None:
         if not result.ok or result.output is None:
             continue
         candidates.extend((result.name, finding) for finding in result.output.get("findings", []))
-    successful_names = [result.name for result in results if result.ok]
     for finding in review.get("findings", []):
-        if finding.get("source_agent") in successful_names:
-            continue
         location = finding.get("code_location") or {}
         path = location.get("absolute_file_path")
         line_range = location.get("line_range")
@@ -113,10 +110,11 @@ def attribute_final_findings(review: dict, results: list[AgentResult]) -> None:
             if str(raw.get("title") or "").casefold() == str(finding.get("title") or "").casefold()
         ]
         selected = title_matches or matches
-        if selected:
-            finding["source_agent"] = selected[0][0]
-        elif successful_names:
-            finding["source_agent"] = successful_names[0]
+        if not selected:
+            raise CoordinatorError(
+                f"coordinator finding at {path!r} {line_range!r} has no raw reviewer source"
+            )
+        finding["source_agent"] = selected[0][0]
 
 
 def run_coordinator(

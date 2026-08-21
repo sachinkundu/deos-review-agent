@@ -185,6 +185,55 @@ def test_cycle_selects_recheck_then_same_head_noop_after_owned_action():
     assert "already evaluated" in repeated.reason
 
 
+def test_same_head_noop_ignores_older_terminal_target_actions():
+    intermediate_head = "c" * 40
+    run_id = run_identity("owner/repo", 7, OLD_HEAD)
+    first_id = finding_identity(
+        make_finding(title="First bug", path="src/a.py", body="First failure"),
+        OLD_HEAD,
+        "correctness",
+    )
+    second_id = finding_identity(
+        make_finding(title="Second bug", path="src/b.py", body="Second failure"),
+        OLD_HEAD,
+        "tests",
+    )
+    comments = [
+        _comment(10, finding_marker(first_id, OLD_HEAD, "correctness")),
+        _comment(11, finding_marker(second_id, OLD_HEAD, "tests"), path="src/b.py"),
+        _comment(
+            12,
+            action_marker(
+                action_identity(first_id, intermediate_head, "fixed"),
+                first_id,
+                intermediate_head,
+                "fixed",
+            ),
+            reply_to=10,
+        ),
+        _comment(
+            13,
+            action_marker(
+                action_identity(second_id, NEW_HEAD, "unfixed"),
+                second_id,
+                NEW_HEAD,
+                "unfixed",
+            ),
+            reply_to=11,
+            path="src/b.py",
+        ),
+    ]
+    snapshot = _snapshot(
+        reviews=[_review(1, run_marker(run_id, OLD_HEAD))],
+        comments=comments,
+    )
+
+    selection = select_review_mode(snapshot, BOT, NEW_HEAD)
+
+    assert selection.mode == "noop"
+    assert "already evaluated" in selection.reason
+
+
 def test_clean_cycle_new_head_starts_initial_and_same_head_is_noop():
     run_id = run_identity("owner/repo", 7, OLD_HEAD)
     old = _snapshot(reviews=[_review(1, run_marker(run_id, OLD_HEAD))], comments=[])
