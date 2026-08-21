@@ -28,6 +28,6 @@
 
 ## 5. Real GitHub proof
 
-- [ ] 5.1 Run the CLI locally against a real PR without posting and retain exact-head history, classification, plan, and no-mutation evidence.
-- [ ] 5.2 Use a disposable real PR to post an initial marked finding, advance the head, post a recheck status to the accepted top-level thread, and verify provider IDs, URLs, and diff-line acceptance.
-- [ ] 5.3 Repeat the exact-head action to prove no duplicate mutation, capture GitHub App/review/comment screenshots, and retain a redacted proof manifest.
+- [x] 5.1 Run the CLI locally against a real PR without posting and retain exact-head history, classification, plan, and no-mutation evidence.
+- [x] 5.2 Use a disposable real PR to post an initial marked finding, advance the head, post a recheck status to the accepted top-level thread, and verify provider IDs, URLs, and diff-line acceptance.
+- [x] 5.3 Repeat the exact-head action to prove no duplicate mutation, capture GitHub App/review/comment screenshots, and retain a redacted proof manifest.
