@@ -81,7 +81,28 @@ not discover, describe, or return any unrelated defect. If no identity is
 assigned, return an empty classifications array.
 
 Read every explicitly assigned input and the repository only as needed to
-evaluate those identities. Return only JSON matching review-recheck-result/v1.
+evaluate those identities.
+
+Your complete response must be exactly one JSON object with this shape (repeat
+one classification object per assigned identity, or use an empty array when no
+identity is assigned):
+
+{{
+  "contract": "review-recheck-result/v1",
+  "classifications": [
+    {{
+      "finding_id": "{target_ids[0] if target_ids else "rbf_assigned_identity"}",
+      "status": "fixed",
+      "evidence": "Current-head evidence for this assigned identity.",
+      "confidence_score": 0.95
+    }}
+  ]
+}}
+
+The only allowed top-level keys are `contract` and `classifications`. Each item
+must use `status` and `confidence_score`, not `classification` or `confidence`.
+Never return discovery fields, prose outside the JSON object, evidence arrays,
+or markdown fences.
 """
 
 

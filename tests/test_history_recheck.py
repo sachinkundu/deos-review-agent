@@ -24,6 +24,7 @@ from review_bot.recheck import (
     RecheckError,
     coordinator_prompt,
     plan_recheck_actions,
+    reviewer_prompt,
     validate_closed_world,
 )
 from tests.conftest import make_finding
@@ -263,6 +264,15 @@ def test_recheck_coordinator_prompt_forbids_discovery_shape():
     assert f'"finding_id": "{finding_id}"' in prompt
     assert '"contract": "review-recheck-result/v1"' in prompt
     assert "Never\nreturn `findings`" in prompt
+
+
+def test_recheck_reviewer_prompt_names_exact_schema_fields():
+    finding_id = "rbf_" + "4" * 32
+    prompt = reviewer_prompt("correctness", [finding_id])
+    assert f'"finding_id": "{finding_id}"' in prompt
+    assert '"status": "fixed"' in prompt
+    assert '"confidence_score": 0.95' in prompt
+    assert "not `classification` or `confidence`" in prompt
 
 
 def test_plan_uses_reply_for_settled_inline_and_no_action_for_ambiguous():
