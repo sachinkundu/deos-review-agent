@@ -20,7 +20,12 @@ from review_bot.history import (
     select_review_mode,
     without_expected_actions,
 )
-from review_bot.recheck import RecheckError, plan_recheck_actions, validate_closed_world
+from review_bot.recheck import (
+    RecheckError,
+    coordinator_prompt,
+    plan_recheck_actions,
+    validate_closed_world,
+)
 from tests.conftest import make_finding
 
 BOT = "review-bot[bot]"
@@ -250,6 +255,14 @@ def test_closed_world_rejects_unknown_missing_and_duplicate_targets():
             {finding_id},
             require_complete=True,
         )
+
+
+def test_recheck_coordinator_prompt_forbids_discovery_shape():
+    finding_id = "rbf_" + "3" * 32
+    prompt = coordinator_prompt([finding_id])
+    assert f'"finding_id": "{finding_id}"' in prompt
+    assert '"contract": "review-recheck-result/v1"' in prompt
+    assert "Never\nreturn `findings`" in prompt
 
 
 def test_plan_uses_reply_for_settled_inline_and_no_action_for_ambiguous():

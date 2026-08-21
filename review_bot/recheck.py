@@ -97,8 +97,27 @@ Join attributed reviewer results to the trusted catalog. Return every roster
 identity exactly once in deterministic roster order with fixed, unfixed,
 obsolete, or ambiguous status, current-head evidence, and confidence. Do not
 introduce a new identity or any GitHub review event. When evidence does not
-settle a target, classify it ambiguous. Return only JSON matching
-review-recheck-result/v1.
+settle a target, classify it ambiguous.
+
+Your complete response must be exactly one JSON object with this shape (repeat
+one classification object per roster identity):
+
+{{
+  "contract": "review-recheck-result/v1",
+  "classifications": [
+    {{
+      "finding_id": "{target_ids[0] if target_ids else "rbf_assigned_identity"}",
+      "status": "fixed",
+      "evidence": "Current-head evidence for this assigned identity.",
+      "confidence_score": 0.95
+    }}
+  ]
+}}
+
+The only allowed top-level keys are `contract` and `classifications`. Never
+return `findings`, `overall_correctness`, `overall_explanation`,
+`overall_confidence_score`, `status`, or markdown fences. This recheck schema
+replaces the discovery-review schema for this invocation.
 """
 
 
