@@ -291,3 +291,157 @@ def test_post_review_surfaces_provider_error(rsa_pem):
     client = GitHubAppClient(creds, session=session)
     with pytest.raises(GitHubError, match="Line not in diff"):
         client.post_review("owner", "repo", 7, "abc", "COMMENT", "body", [], token="tok")
+
+
+def test_required_history_rest_feeds_follow_link_pagination(rsa_pem):
+    key_path, _ = rsa_pem
+    session = FakeSession()
+    review_calls = 0
+
+    def reviews(_headers, _body):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls == 1:
+            return FakeResponse(
+                200,
+                [{"id": 1}],
+                headers={
+                    "Link": (
+                        "<https://api.github.com/repos/owner/repo/pulls/7/reviews?page=2>; "
+                        'rel="next"'
+                    )
+                },
+            )
+        return FakeResponse(200, [{"id": 2}])
+
+    session.route("GET", "/repos/owner/repo/pulls/7/reviews", reviews)
+    session.route("GET", "/repos/owner/repo/pulls/7/comments", lambda _h, _b: [])
+    session.route("GET", "/repos/owner/repo/issues/7/comments", lambda _h, _b: [])
+    session.route("POST", "/graphql", lambda _h, _b: FakeResponse(403, {"message": "forbidden"}))
+    client = GitHubAppClient(
+        Credentials(app_id="1", installation_id="2", private_key_path=str(key_path)),
+        session=session,
+    )
+    history = client.fetch_complete_history("owner", "repo", 7, "a" * 40, "tok")
+    assert [review["id"] for review in history["reviews"]] == [1, 2]
+    assert review_calls == 2
+    assert history["resolution_source"] == "unknown"
+
+
+def test_required_history_rest_failure_stops_instead_of_returning_partial(rsa_pem):
+    key_path, _ = rsa_pem
+    session = FakeSession()
+    session.route(
+        "GET",
+        "/repos/owner/repo/pulls/7/reviews",
+        lambda _h, _b: FakeResponse(500, {"message": "provider failure"}),
+    )
+    client = GitHubAppClient(
+        Credentials(app_id="1", installation_id="2", private_key_path=str(key_path)),
+        session=session,
+    )
+    with pytest.raises(GitHubError, match="provider failure"):
+        client.fetch_reviews("owner", "repo", 7, "tok")
+
+
+def test_graphql_paginates_threads_and_each_comment_connection(rsa_pem):
+    key_path, _ = rsa_pem
+    session = FakeSession()
+
+    def graphql(_headers, body):
+        variables = body["variables"]
+        if "thread" in variables:
+            return {
+                "data": {
+                    "node": {
+                        "comments": {
+                            "nodes": [{"id": "C2"}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        if variables["cursor"] is None:
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [{"id": "C1"}],
+                                            "pageInfo": {
+                                                "hasNextPage": True,
+                                                "endCursor": "comments-1",
+                                            },
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": True, "endCursor": "threads-1"},
+                            }
+                        }
+                    }
+                }
+            }
+        return {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "T2",
+                                    "isResolved": True,
+                                    "comments": {
+                                        "nodes": [{"id": "C3"}],
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+
+    session.route("POST", "/graphql", graphql)
+    client = GitHubAppClient(
+        Credentials(app_id="1", installation_id="2", private_key_path=str(key_path)),
+        session=session,
+    )
+    threads, source = client.fetch_review_threads("owner", "repo", 7, "tok")
+    assert source == "graphql"
+    assert threads == [
+        {"node_id": "T1", "is_resolved": False, "comments": [{"id": "C1"}, {"id": "C2"}]},
+        {"node_id": "T2", "is_resolved": True, "comments": [{"id": "C3"}]},
+    ]
+
+
+def test_reply_and_general_comment_use_distinct_provider_surfaces(rsa_pem):
+    key_path, _ = rsa_pem
+    session = FakeSession()
+    session.route(
+        "POST",
+        "/repos/owner/repo/pulls/7/comments/10/replies",
+        lambda _h, body: FakeResponse(201, {"id": 11, "body": body["body"]}),
+    )
+    session.route(
+        "POST",
+        "/repos/owner/repo/issues/7/comments",
+        lambda _h, body: FakeResponse(201, {"id": 12, "body": body["body"]}),
+    )
+    client = GitHubAppClient(
+        Credentials(app_id="1", installation_id="2", private_key_path=str(key_path)),
+        session=session,
+    )
+    assert client.post_review_reply("owner", "repo", 7, 10, "fixed", "tok")["id"] == 11
+    assert client.post_issue_comment("owner", "repo", 7, "fixed", "tok")["id"] == 12
+    assert session.calls[-2][1].endswith("/comments/10/replies")
+    assert session.calls[-1][1].endswith("/issues/7/comments")

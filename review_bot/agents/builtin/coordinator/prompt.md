@@ -32,6 +32,8 @@ Read every assigned file before coordinating.
 5. Assign final severity using the shared priority scale.
 6. Assign the overall verdict: any retained finding means "patch is incorrect";
    no findings means "patch is correct". Give one paragraph explaining it.
+7. Preserve the trusted `source_agent` attribution from the selected raw finding
+   on every emitted finding so a later recheck can return it to the same role.
 
 ## Bias
 

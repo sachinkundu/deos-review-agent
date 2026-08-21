@@ -49,3 +49,5 @@ state-machine contract. Do not drift into opinions without a concrete bug.
 Respond with only the JSON object matching the provided schema. The top-level
 object must contain exactly `findings`, `overall_correctness`,
 `overall_explanation`, `overall_confidence_score`, and `status`.
+Coordinator findings may additionally preserve the trusted `source_agent`
+attribution supplied by `raw-findings.json`.

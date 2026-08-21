@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review recheck action plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "repository", "pull_number", "head_sha", "history_digest", "classifications", "actions"],
+  "properties": {
+    "contract": {"const": "review-recheck-plan/v1"},
+    "repository": {"type": "string"},
+    "pull_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "minLength": 6},
+    "history_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "classifications": {"type": "array"},
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action_id", "finding_id", "classification", "surface", "body", "target_provider_id"],
+        "properties": {
+          "action_id": {"type": "string", "pattern": "^rba_[0-9a-f]{32}$"},
+          "finding_id": {"type": "string", "pattern": "^rbf_[0-9a-f]{32}$"},
+          "classification": {"enum": ["fixed", "unfixed", "obsolete"]},
+          "surface": {"enum": ["review_reply", "issue_comment"]},
+          "body": {"type": "string", "minLength": 1},
+          "target_provider_id": {"type": ["integer", "string"]}
+        }
+      }
+    }
+  }
+}

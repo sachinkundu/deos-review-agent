@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical GitHub review history",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "repository", "pull_number", "head_sha", "fetched_at", "resolution_source", "reviews", "review_comments", "issue_comments", "review_threads", "digest"],
+  "properties": {
+    "contract": {"const": "review-history/v1"},
+    "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+    "pull_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "minLength": 6},
+    "fetched_at": {"type": "string", "minLength": 1},
+    "resolution_source": {"enum": ["graphql", "unknown"]},
+    "reviews": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "review_comments": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "issue_comments": {"type": "array", "items": {"$ref": "#/$defs/object"}},
+    "review_threads": {"type": "array", "items": {"$ref": "#/$defs/thread"}},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "object": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "author", "body", "created_at", "updated_at", "url", "surface"],
+      "properties": {
+        "id": {"type": ["integer", "string"]},
+        "author": {"type": "string"},
+        "body": {"type": "string"},
+        "created_at": {"type": ["string", "null"]},
+        "updated_at": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "surface": {"enum": ["review", "review_comment", "issue_comment"]}
+      }
+    },
+    "thread": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "is_resolved", "comments"],
+      "properties": {
+        "node_id": {"type": "string"},
+        "is_resolved": {"type": ["boolean", "string"], "enum": [true, false, "unknown"]},
+        "comments": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from .agents.registry import (
 )
 from .coordinator import RAW_FINDINGS_NAME
 from .diff_filter import PROVIDER_DIFF_NAME, REVIEW_DIFF_NAME
+from .history import HEAD_EVIDENCE_NAME, HISTORY_NAME, TARGETS_NAME
 from .shared_context import SHARED_CONTEXT_NAME
 
 RUN_MANIFEST_NAME = "run-manifest.json"
@@ -30,6 +32,11 @@ _RESOURCE_FILENAMES = {
     InputResource.PROVIDER_DIFF: PROVIDER_DIFF_NAME,
     InputResource.AGENT_CATALOG: AGENT_CATALOG_NAME,
     InputResource.RAW_FINDINGS: RAW_FINDINGS_NAME,
+    InputResource.REVIEW_HISTORY: HISTORY_NAME,
+    InputResource.RECHECK_HISTORY: "reviewer-history.json",
+    InputResource.RECHECK_TARGETS: "assigned-targets.json",
+    InputResource.CURRENT_HEAD_EVIDENCE: HEAD_EVIDENCE_NAME,
+    InputResource.TARGET_CATALOG: TARGETS_NAME,
 }
 
 
@@ -73,8 +80,11 @@ class ResourceResolver:
     def close(self) -> None:
         shutil.rmtree(self._tmp_root, ignore_errors=True)
 
-    def _artifact_for(self, resource: InputResource) -> Path:
-        path = self.artifact_dir / _RESOURCE_FILENAMES[resource]
+    def _artifact_for(self, resource: InputResource, agent: AgentDefinition) -> Path:
+        if resource in {InputResource.RECHECK_HISTORY, InputResource.RECHECK_TARGETS}:
+            path = self.artifact_dir / "recheck-inputs" / agent.name / _RESOURCE_FILENAMES[resource]
+        else:
+            path = self.artifact_dir / _RESOURCE_FILENAMES[resource]
         if not path.is_file():
             raise ResourceError(f"assigned resource {resource.value!r} does not exist: {path}")
         return path
@@ -106,7 +116,7 @@ class ResourceResolver:
         assigned: list[dict[str, str]] = []
         input_files: list[str] = []
         for resource in agent.inputs:
-            source = self._artifact_for(resource)
+            source = self._artifact_for(resource, agent)
             relative = Path("inputs") / source.name
             destination = root / relative
             shutil.copy2(source, destination)
@@ -158,3 +168,48 @@ def write_registry_artifacts(
     )
     catalog.write_text(json.dumps(catalog_document(registry), indent=2) + "\n", encoding="utf-8")
     return run_manifest, catalog
+
+
+def write_recheck_resources(
+    artifact_dir: Path,
+    reviewer_views: dict[str, dict[str, object]],
+    reviewer_targets: dict[str, list[dict[str, object]]],
+    head_evidence: dict[str, object],
+) -> None:
+    """Persist host-owned recheck inputs and audit only identities/digests."""
+    artifact_dir = Path(artifact_dir)
+    (artifact_dir / HEAD_EVIDENCE_NAME).write_text(
+        json.dumps(head_evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    manifest_path = artifact_dir / RUN_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assignments: list[dict[str, object]] = []
+    for reviewer, view in reviewer_views.items():
+        root = artifact_dir / "recheck-inputs" / reviewer
+        root.mkdir(parents=True, exist_ok=True)
+        target_document = {
+            "contract": "review-assigned-targets/v1",
+            "reviewer": reviewer,
+            "targets": reviewer_targets.get(reviewer, []),
+        }
+        values = {
+            "recheck-history": ("reviewer-history.json", view),
+            "recheck-targets": ("assigned-targets.json", target_document),
+        }
+        resources: list[dict[str, object]] = []
+        for symbolic_name, (filename, document) in values.items():
+            encoded = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+            (root / filename).write_text(encoded, encoding="utf-8")
+            resources.append(
+                {
+                    "symbolic_name": symbolic_name,
+                    "schema_version": document.get("contract"),
+                    "digest": "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                    "target_identities": [
+                        target["finding_id"] for target in reviewer_targets.get(reviewer, [])
+                    ],
+                }
+            )
+        assignments.append({"agent": reviewer, "resources": resources})
+    manifest["recheck_resources"] = assignments
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

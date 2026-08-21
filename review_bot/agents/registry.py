@@ -29,6 +29,11 @@ class InputResource(StrEnum):
     PROVIDER_DIFF = "provider-diff"
     AGENT_CATALOG = "agent-catalog"
     RAW_FINDINGS = "raw-findings"
+    REVIEW_HISTORY = "review-history"
+    RECHECK_HISTORY = "recheck-history"
+    RECHECK_TARGETS = "recheck-targets"
+    CURRENT_HEAD_EVIDENCE = "current-head-evidence"
+    TARGET_CATALOG = "target-catalog"
 
 
 @dataclass(frozen=True)

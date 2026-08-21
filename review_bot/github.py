@@ -37,6 +37,8 @@ from typing import Any
 import jwt
 import requests
 
+from .history import build_history_snapshot
+
 API_VERSION = "2026-03-10"
 JWT_MAX_LIFETIME_SECONDS = 10 * 60
 JWT_LIFETIME_SECONDS = 540  # stay under the 10-minute maximum with margin
@@ -297,6 +299,164 @@ class GitHubAppClient:
             )
         return resp.text
 
+    def _rest_pages(self, url: str, token: str, label: str) -> list[dict[str, Any]]:
+        """Fetch a required REST collection through its final Link page."""
+        items: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        next_url: str | None = url
+        while next_url:
+            if next_url in seen_urls:
+                raise GitHubError(f"{label} pagination looped at {next_url}")
+            seen_urls.add(next_url)
+            try:
+                resp = self._session.get(
+                    next_url, headers=self._installation_headers(token), timeout=30
+                )
+            except requests.RequestException as exc:
+                raise GitHubError(f"{label} fetch failed: {exc}") from exc
+            if resp.status_code != 200:
+                raise GitHubError(
+                    f"{label} fetch failed (HTTP {resp.status_code}): {_error_body(resp)}"
+                )
+            payload = resp.json()
+            if not isinstance(payload, list):
+                raise GitHubError(f"{label} response was not a list")
+            items.extend(item for item in payload if isinstance(item, dict))
+            next_url = _next_link(getattr(resp, "headers", {}).get("Link", ""))
+        return items
+
+    def fetch_reviews(self, owner: str, repo: str, number: int, token: str) -> list[dict[str, Any]]:
+        return self._rest_pages(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100",
+            token,
+            "pull request reviews",
+        )
+
+    def fetch_review_comments(
+        self, owner: str, repo: str, number: int, token: str
+    ) -> list[dict[str, Any]]:
+        return self._rest_pages(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/{number}/comments?per_page=100",
+            token,
+            "pull request review comments",
+        )
+
+    def fetch_issue_comments(
+        self, owner: str, repo: str, number: int, token: str
+    ) -> list[dict[str, Any]]:
+        return self._rest_pages(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/issues/{number}/comments?per_page=100",
+            token,
+            "pull request issue comments",
+        )
+
+    def _graphql(self, token: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        resp = self._session.post(
+            f"{self._creds.base_url}/graphql",
+            headers=self._installation_headers(token),
+            json={"query": query, "variables": variables},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise GitHubError(
+                f"review-thread GraphQL fetch failed (HTTP {resp.status_code}): {_error_body(resp)}"
+            )
+        payload = resp.json()
+        if not isinstance(payload, dict) or payload.get("errors"):
+            raise GitHubError("review-thread GraphQL response contained errors")
+        return payload
+
+    def fetch_review_threads(
+        self, owner: str, repo: str, number: int, token: str
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Best-effort thread state with independent thread/comment cursors."""
+        threads_query = """
+        query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
+          repository(owner:$owner, name:$repo) {
+            pullRequest(number:$number) {
+              reviewThreads(first:100, after:$cursor) {
+                nodes { id isResolved comments(first:100) {
+                  nodes { id }
+                  pageInfo { hasNextPage endCursor }
+                } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+        """
+        comments_query = """
+        query($thread:ID!, $cursor:String) {
+          node(id:$thread) { ... on PullRequestReviewThread {
+            comments(first:100, after:$cursor) {
+              nodes { id }
+              pageInfo { hasNextPage endCursor }
+            }
+          } }
+        }
+        """
+        try:
+            threads: list[dict[str, Any]] = []
+            cursor: str | None = None
+            while True:
+                payload = self._graphql(
+                    token,
+                    threads_query,
+                    {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
+                )
+                connection = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+                for node in connection.get("nodes") or []:
+                    comments = node.get("comments") or {}
+                    comment_nodes = list(comments.get("nodes") or [])
+                    comment_cursor = (comments.get("pageInfo") or {}).get("endCursor")
+                    while (comments.get("pageInfo") or {}).get("hasNextPage"):
+                        extra = self._graphql(
+                            token,
+                            comments_query,
+                            {"thread": node["id"], "cursor": comment_cursor},
+                        )["data"]["node"]["comments"]
+                        comment_nodes.extend(extra.get("nodes") or [])
+                        comments = extra
+                        comment_cursor = (extra.get("pageInfo") or {}).get("endCursor")
+                    threads.append(
+                        {
+                            "node_id": node["id"],
+                            "is_resolved": node.get("isResolved", "unknown"),
+                            "comments": comment_nodes,
+                        }
+                    )
+                page_info = connection.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    return threads, "graphql"
+                cursor = page_info.get("endCursor")
+                if not cursor:
+                    raise GitHubError("review-thread GraphQL pagination omitted endCursor")
+        except (GitHubError, KeyError, TypeError, ValueError):
+            return [], "unknown"
+
+    def fetch_complete_history(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        head_sha: str,
+        token: str,
+    ) -> dict[str, Any]:
+        reviews = self.fetch_reviews(owner, repo, number, token)
+        review_comments = self.fetch_review_comments(owner, repo, number, token)
+        issue_comments = self.fetch_issue_comments(owner, repo, number, token)
+        threads, resolution_source = self.fetch_review_threads(owner, repo, number, token)
+        return build_history_snapshot(
+            repository=f"{owner}/{repo}",
+            pull_number=number,
+            head_sha=head_sha,
+            reviews=reviews,
+            review_comments=review_comments,
+            issue_comments=issue_comments,
+            review_threads=threads,
+            resolution_source=resolution_source,  # type: ignore[arg-type]
+        )
+
     # -- review -------------------------------------------------------------
 
     def post_review(
@@ -331,6 +491,91 @@ class GitHubAppClient:
             )
         return resp.json()
 
+    def fetch_review(
+        self, owner: str, repo: str, number: int, review_id: int | str, token: str
+    ) -> dict[str, Any]:
+        return self._get_object(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}",
+            token,
+            "review read-back",
+        )
+
+    def fetch_review_comments_for_review(
+        self, owner: str, repo: str, number: int, review_id: int | str, token: str
+    ) -> list[dict[str, Any]]:
+        return self._rest_pages(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/{number}/reviews/"
+            f"{review_id}/comments?per_page=100",
+            token,
+            "review comment read-back",
+        )
+
+    def fetch_review_comment(
+        self, owner: str, repo: str, comment_id: int | str, token: str
+    ) -> dict[str, Any]:
+        return self._get_object(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/comments/{comment_id}",
+            token,
+            "review comment read-back",
+        )
+
+    def fetch_issue_comment(
+        self, owner: str, repo: str, comment_id: int | str, token: str
+    ) -> dict[str, Any]:
+        return self._get_object(
+            f"{self._creds.base_url}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            token,
+            "issue comment read-back",
+        )
+
+    def _get_object(self, url: str, token: str, label: str) -> dict[str, Any]:
+        resp = self._session.get(url, headers=self._installation_headers(token), timeout=30)
+        if resp.status_code != 200:
+            raise GitHubError(f"{label} failed (HTTP {resp.status_code}): {_error_body(resp)}")
+        payload = resp.json()
+        if not isinstance(payload, dict):
+            raise GitHubError(f"{label} response was not an object")
+        return payload
+
+    def post_review_reply(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        top_level_comment_id: int | str,
+        body: str,
+        token: str,
+    ) -> dict[str, Any]:
+        url = (
+            f"{self._creds.base_url}/repos/{owner}/{repo}/pulls/{number}/comments/"
+            f"{top_level_comment_id}/replies"
+        )
+        resp = self._session.post(
+            url, headers=self._installation_headers(token), json={"body": body}, timeout=30
+        )
+        if resp.status_code != 201:
+            raise GitHubError(
+                f"review reply POST failed (HTTP {resp.status_code}): {_error_body(resp)}",
+                status=resp.status_code,
+                details=resp.text[:2000],
+            )
+        return resp.json()
+
+    def post_issue_comment(
+        self, owner: str, repo: str, number: int, body: str, token: str
+    ) -> dict[str, Any]:
+        url = f"{self._creds.base_url}/repos/{owner}/{repo}/issues/{number}/comments"
+        resp = self._session.post(
+            url, headers=self._installation_headers(token), json={"body": body}, timeout=30
+        )
+        if resp.status_code != 201:
+            raise GitHubError(
+                f"issue comment POST failed (HTTP {resp.status_code}): {_error_body(resp)}",
+                status=resp.status_code,
+                details=resp.text[:2000],
+            )
+        return resp.json()
+
 
 def _error_body(resp: requests.Response) -> str:
     try:
@@ -342,6 +587,14 @@ def _error_body(resp: requests.Response) -> str:
         return message or resp.text[:500]
     except ValueError:
         return resp.text[:500]
+
+
+def _next_link(header: str) -> str | None:
+    for item in header.split(","):
+        match = re.match(r'\s*<([^>]+)>\s*;\s*rel="([^"]+)"', item)
+        if match and match.group(2) == "next":
+            return match.group(1)
+    return None
 
 
 def build_inline_comments(attachable: list[tuple[dict, int]]) -> list[dict]:
@@ -387,4 +640,6 @@ def format_comment_body(finding: dict[str, Any]) -> str:
         parts.append(f"\n**Suggested fix:** {fix['description']}")
         if fix.get("replacement"):
             parts.append(f"\n```\n{fix['replacement']}\n```")
+    if finding.get("_finding_marker"):
+        parts.append(f"\n{finding['_finding_marker']}")
     return "\n".join(parts)
